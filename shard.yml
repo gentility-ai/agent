@@ -1,0 +1,13 @@
+name: gentility-agent
+version: 1.0.0
+
+targets:
+  agent:
+    main: agent.cr
+
+dependencies:
+  msgpack:
+    github: crystal-community/msgpack-crystal
+    version: ~> 1.0
+
+crystal: ">= 1.0.0"
