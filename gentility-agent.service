@@ -1,0 +1,50 @@
+[Unit]
+Description=Gentility AI Agent Daemon
+Documentation=https://gentility.ai
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=gentility
+Group=gentility
+ExecStart=/usr/bin/gentility-agent
+Restart=always
+RestartSec=10
+TimeoutStartSec=30
+TimeoutStopSec=15
+
+# Security settings
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/log/gentility-agent /var/lib/gentility-agent
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+
+# Environment
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=-/etc/gentility.conf
+
+# Working directory and state
+WorkingDirectory=/var/lib/gentility-agent
+StateDirectory=gentility-agent
+LogsDirectory=gentility-agent
+
+# Standard I/O
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gentility-agent
+
+[Install]
+WantedBy=multi-user.target
