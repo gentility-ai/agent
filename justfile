@@ -67,8 +67,8 @@ build-local-arm64: install-deps
     crystal build src/agent.cr --release --no-debug -o {{bin_dir}}/{{binary_name}}-{{version}}-darwin-arm64
     @echo "Darwin ARM64 binary built: {{bin_dir}}/{{binary_name}}-{{version}}-darwin-arm64"
 
-# Create DEB package for AMD64 (with automatic version management)
-package-amd64: version-update build-remote-amd64
+# Create DEB package for AMD64 
+package-amd64: build-remote-amd64
     @echo "Creating DEB package for AMD64..."
     @if [ -f "{{binary_name}}_{{version}}_amd64.deb" ]; then \
         echo "⚠️  Package {{binary_name}}_{{version}}_amd64.deb already exists!"; \
@@ -186,19 +186,29 @@ repo-update-local repo_name="gentility-main" distribution="stable": package
     aptly -config=configs/aptly.conf publish update -distribution={{distribution}} local:{{distribution}}
     @echo "Local repository updated"
 
-# Update S3/DO Spaces published repository
-repo-update-s3 repo_name="gentility-main" distribution="stable": package
-    @echo "Updating DO Spaces repository with new package..."
-    aptly -config=configs/aptly.conf repo add {{repo_name}} {{deb_file}}
-    @if [ -f .env ]; then \
-        export $(cat .env | grep -v '^#' | xargs) && \
-        AWS_ACCESS_KEY_ID="${DO_ACCESS_KEY}" AWS_SECRET_ACCESS_KEY="${DO_SECRET_KEY}" \
-        aptly -config=configs/aptly.conf publish update -gpg-key="${GPG_KEY_ID}" {{distribution}} s3:do-spaces:; \
-    else \
-        echo "Error: .env file not found. Please create it with DO_ACCESS_KEY and DO_SECRET_KEY"; \
-        exit 1; \
+# Update S3/DO Spaces published repository  
+repo-update-s3 repo_name="gentility-main" distribution="stable":
+    #!/bin/bash
+    set -e
+    echo "Updating DO Spaces repository with new package..."
+    current_version=$(cat .version-lock.json | jq -r '.current_version')
+    deb_file="{{binary_name}}_${current_version}_amd64.deb"
+    
+    if [ ! -f "$deb_file" ]; then
+        echo "Error: Package file $deb_file not found!"
+        exit 1
     fi
-    @echo "DO Spaces repository updated"
+    
+    aptly -config=configs/aptly.conf repo add {{repo_name}} "$deb_file"
+    if [ -f .env ]; then
+        export $(cat .env | grep -v '^#' | xargs)
+        AWS_ACCESS_KEY_ID="${DO_ACCESS_KEY}" AWS_SECRET_ACCESS_KEY="${DO_SECRET_KEY}" \
+        aptly -config=configs/aptly.conf publish update -gpg-key="${GPG_KEY_ID}" {{distribution}} s3:do-spaces:
+    else
+        echo "Error: .env file not found. Please create it with DO_ACCESS_KEY and DO_SECRET_KEY"
+        exit 1
+    fi
+    echo "DO Spaces repository updated"
 
 # Sync local repository to remote server via rsync
 repo-sync-remote remote_path:
@@ -209,21 +219,26 @@ repo-sync-remote remote_path:
 
 # Complete release workflow (build, package, and publish)
 release type="patch":
-    @echo "🚀 Starting automated release workflow..."
-    @just version-check
-    @echo ""
-    @echo "📦 Building and packaging..."
-    @just package-amd64
-    @echo ""
-    @echo "📤 Updating repository..."
-    @just repo-update-s3
-    @echo ""
-    @echo "✅ Release v{{version}} completed successfully!"
-    @echo ""
-    @echo "📊 Release Summary:"
-    @echo "  Version: {{version}}"
-    @echo "  Package: {{binary_name}}_{{version}}_amd64.deb"
-    @echo "  Repository: https://gentility.sgp1.digitaloceanspaces.com/debian/"
+    #!/bin/bash
+    set -e
+    echo "🚀 Starting automated release workflow..."
+    just version-update {{type}}
+    echo ""
+    echo "📦 Building and packaging..."
+    just package-amd64
+    echo ""
+    echo "📤 Updating repository..."
+    just repo-update-s3
+    echo ""
+    
+    # Get current version after update
+    current_version=$(cat .version-lock.json | jq -r '.current_version')
+    echo "✅ Release v${current_version} completed successfully!"
+    echo ""
+    echo "📊 Release Summary:"
+    echo "  Version: ${current_version}"
+    echo "  Package: {{binary_name}}_${current_version}_amd64.deb"
+    echo "  Repository: https://gentility.sgp1.digitaloceanspaces.com/debian/"
 
 # Legacy release command (renamed to avoid conflict)
 release-legacy repo_name="gentility-main" distribution="stable": package (repo-update repo_name distribution)
@@ -268,29 +283,42 @@ version-check:
 
 # Update version automatically when source changes
 version-update type="patch":
-    @echo "Checking if version update is needed..."
-    @if [ "{{current_hash}}" = "{{lockfile_hash}}" ]; then \
-        echo "  ✅ Source hasn't changed, no version update needed"; \
-        exit 0; \
+    #!/bin/bash
+    set -e
+    
+    current_hash_check=$(grep -v 'VERSION = ' src/agent.cr | shasum -a 256 | cut -d' ' -f1)
+    lockfile_hash_check=$(cat .version-lock.json 2>/dev/null | jq -r '.source_hash // ""' 2>/dev/null || echo "")
+    
+    if [ "$current_hash_check" = "$lockfile_hash_check" ] && [ ! -z "$lockfile_hash_check" ]; then
+        echo "✅ Source hasn't changed, no version update needed"
+        exit 0
     fi
-    @echo "  🔄 Source has changed, incrementing version..."
-    @current_version={{version}}; \
-    IFS='.' read -r major minor patch <<< "$current_version"; \
-    if [ "{{type}}" = "major" ]; then \
-        new_version="$((major + 1)).0.0"; \
-    elif [ "{{type}}" = "minor" ]; then \
-        new_version="$major.$((minor + 1)).0"; \
-    else \
-        new_version="$major.$minor.$((patch + 1))"; \
-    fi; \
-    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ"); \
-    echo "  📝 Updating version from $current_version to $new_version"; \
-    sed -i '' "s/VERSION = \"$current_version\"/VERSION = \"$new_version\"/" src/agent.cr; \
-    sed -i '' "s/version: \"$current_version\"/version: \"$new_version\"/" nfpm.yaml nfpm-arm64.yaml 2>/dev/null || true; \
-    old_entry=$(cat .version-lock.json 2>/dev/null | jq -c '{version: .current_version, hash: .source_hash, timestamp: .last_updated}' 2>/dev/null || echo '{}'); \
-    cat .version-lock.json 2>/dev/null | jq --arg version "$$new_version" --arg hash "{{current_hash}}" --arg timestamp "$$timestamp" --argjson old "$$old_entry" \
+    
+    echo "🔄 Source has changed, incrementing version..."
+    current_version={{version}}
+    IFS='.' read -r major minor patch <<< "$current_version"
+    
+    if [ "{{type}}" = "major" ]; then
+        new_version="$((major + 1)).0.0"
+    elif [ "{{type}}" = "minor" ]; then
+        new_version="$major.$((minor + 1)).0"
+    else
+        new_version="$major.$minor.$((patch + 1))"
+    fi
+    
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    echo "  📝 Updating version from $current_version to $new_version"
+    
+    sed -i '' "s/VERSION = \"$current_version\"/VERSION = \"$new_version\"/" src/agent.cr
+    sed -i '' "s/version: \"$current_version\"/version: \"$new_version\"/" nfpm.yaml nfpm-arm64.yaml 2>/dev/null || true
+    
+    old_entry=$(cat .version-lock.json 2>/dev/null | jq -c '{version: .current_version, hash: .source_hash, timestamp: .last_updated}' 2>/dev/null || echo '{}')
+    new_hash=$(grep -v 'VERSION = ' src/agent.cr | shasum -a 256 | cut -d' ' -f1)
+    
+    cat .version-lock.json 2>/dev/null | jq --arg version "$new_version" --arg hash "$new_hash" --arg timestamp "$timestamp" --argjson old "$old_entry" \
         '.current_version = $version | .source_hash = $hash | .last_updated = $timestamp | .history = ((.history // []) + [$old])[-10:]' > .version-lock.json.tmp && mv .version-lock.json.tmp .version-lock.json || \
-    echo "{\"current_version\": \"$new_version\", \"source_hash\": \"{{current_hash}}\", \"last_updated\": \"$timestamp\", \"history\": []}" | jq . > .version-lock.json; \
+    echo "{\"current_version\": \"$new_version\", \"source_hash\": \"$new_hash\", \"last_updated\": \"$timestamp\", \"history\": []}" | jq . > .version-lock.json
+    
     echo "  ✅ Version updated to $new_version and lockfile saved"
 
 # Force version bump (manual override)
@@ -310,9 +338,10 @@ version-bump type="patch":
     sed -i '' "s/VERSION = \"$current_version\"/VERSION = \"$new_version\"/" src/agent.cr; \
     sed -i '' "s/version: \"$current_version\"/version: \"$new_version\"/" nfpm.yaml nfpm-arm64.yaml 2>/dev/null || true; \
     old_entry=$(cat .version-lock.json 2>/dev/null | jq -c '{version: .current_version, hash: .source_hash, timestamp: .last_updated}' 2>/dev/null || echo '{}'); \
-    cat .version-lock.json 2>/dev/null | jq --arg version "$$new_version" --arg hash "{{current_hash}}" --arg timestamp "$$timestamp" --argjson old "$$old_entry" \
+    new_hash=$(grep -v 'VERSION = ' src/agent.cr | shasum -a 256 | cut -d' ' -f1); \
+    cat .version-lock.json 2>/dev/null | jq --arg version "$new_version" --arg hash "$new_hash" --arg timestamp "$timestamp" --argjson old "$old_entry" \
         '.current_version = $version | .source_hash = $hash | .last_updated = $timestamp | .history = ((.history // []) + [$old])[-10:]' > .version-lock.json.tmp && mv .version-lock.json.tmp .version-lock.json || \
-    echo "{\"current_version\": \"$new_version\", \"source_hash\": \"{{current_hash}}\", \"last_updated\": \"$timestamp\", \"history\": []}" | jq . > .version-lock.json; \
+    echo "{\"current_version\": \"$new_version\", \"source_hash\": \"$new_hash\", \"last_updated\": \"$timestamp\", \"history\": []}" | jq . > .version-lock.json; \
     echo "  ✅ Version bumped to $new_version"
 
 # Show build information
