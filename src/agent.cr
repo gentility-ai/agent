@@ -657,7 +657,7 @@ def parse_arguments
   end
 
   # Load configuration from file if it exists (can be overridden by args/env)
-  config_file = "/etc/gentility-agent.conf"
+  config_file = "/etc/gentility.conf"
   config = load_config_from_file(config_file) || {} of String => String
 
   access_key = access_key || config["ACCESS_KEY"]? || config["GENTILITY_TOKEN"]?

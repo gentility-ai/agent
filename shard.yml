@@ -3,7 +3,7 @@ version: 1.0.0
 
 targets:
   agent:
-    main: agent.cr
+    main: src/agent.cr
 
 dependencies:
   msgpack:
