@@ -7,7 +7,7 @@ require "file"
 
 # Agent client version
 # MAKE SURE YOU UPDATE THIS VERSION
-VERSION = "1.0.9"
+VERSION = "1.0.10"
 
 # Agent client that connects to the Gentility server via WebSocket
 class GentilityAgent
