@@ -16,6 +16,10 @@ private.key
 secret*
 credentials*
 
+# Version tracking (keep local)
+.version-lock.json
+.version-lock.json.tmp
+
 !*.conf.example
 !gentility-agent.conf.example
 

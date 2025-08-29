@@ -1,18 +1,17 @@
 # Gentility AI Agent - Build and Packaging with Just
 
 binary_name := "gentility-agent"
-version := `grep 'VERSION = ' src/agent.cr | cut -d'"' -f2`
 bin_dir := "bin"
 # Default to amd64 for production deployments
 arch := env_var_or_default("TARGET_ARCH", "amd64")
-deb_file := binary_name + "_" + version + "_" + arch + ".deb"
 
-# Get current git commit hash
-git_hash := `git rev-parse --short HEAD`
-# Check if working directory is clean
-git_clean := `git diff --quiet && git diff --cached --quiet && echo "clean" || echo "dirty"`
-# Get latest git tag
-latest_tag := `git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0"`
+# Get current source hash (excluding the VERSION line to avoid feedback loop)
+current_hash := `grep -v 'VERSION = ' src/agent.cr | shasum -a 256 | cut -d' ' -f1`
+lockfile_version := `cat .version-lock.json 2>/dev/null | jq -r '.current_version // "1.0.0"' 2>/dev/null || echo "1.0.0"`
+lockfile_hash := `cat .version-lock.json 2>/dev/null | jq -r '.source_hash // ""' 2>/dev/null || echo ""`
+
+version := lockfile_version
+deb_file := binary_name + "_" + version + "_" + arch + ".deb"
 
 # Show available commands
 default:
@@ -68,29 +67,18 @@ build-local-arm64: install-deps
     crystal build src/agent.cr --release --no-debug -o {{bin_dir}}/{{binary_name}}-{{version}}-darwin-arm64
     @echo "Darwin ARM64 binary built: {{bin_dir}}/{{binary_name}}-{{version}}-darwin-arm64"
 
-# Create DEB package for AMD64 (with version check)
-package-amd64: build-remote-amd64
+# Create DEB package for AMD64 (with automatic version management)
+package-amd64: version-update build-remote-amd64
     @echo "Creating DEB package for AMD64..."
-    @if [ "v{{version}}" = "{{latest_tag}}" ] && [ -f "{{binary_name}}_{{version}}_amd64.deb" ]; then \
-        echo "⚠️  WARNING: Package {{binary_name}}_{{version}}_amd64.deb already exists!"; \
-        echo "This version has already been built and tagged."; \
-        echo "Run 'just version-bump' to create a new version."; \
-        exit 1; \
-    fi
-    @if [ "{{git_clean}}" != "clean" ]; then \
-        echo "⚠️  WARNING: Building package with uncommitted changes!"; \
-        echo "Consider committing your changes first for reproducible builds."; \
+    @if [ -f "{{binary_name}}_{{version}}_amd64.deb" ]; then \
+        echo "⚠️  Package {{binary_name}}_{{version}}_amd64.deb already exists!"; \
+        echo "Removing existing package to rebuild with latest changes..."; \
+        rm -f {{binary_name}}_{{version}}_amd64.deb; \
     fi
     @cp {{bin_dir}}/{{binary_name}}-{{version}}-linux-amd64 {{bin_dir}}/{{binary_name}}
     nfpm pkg --packager deb --config nfpm.yaml --target {{binary_name}}_{{version}}_amd64.deb
     @rm {{bin_dir}}/{{binary_name}}
-    @echo "DEB package created: {{binary_name}}_{{version}}_amd64.deb"
-    @echo "Next steps:"
-    @echo "  1. Test the package locally"
-    @echo "  2. Commit your changes: git add -A && git commit -m 'Release v{{version}}'"
-    @echo "  3. Tag the release: just version-tag"
-    @echo "  4. Add to repository: just repo-add-amd64"
-    @echo "  5. Publish: just repo-publish-s3"
+    @echo "✅ DEB package created: {{binary_name}}_{{version}}_amd64.deb"
 
 # Create DEB package for ARM64 (requires Linux ARM64 build)
 package-arm64:
@@ -205,7 +193,7 @@ repo-update-s3 repo_name="gentility-main" distribution="stable": package
     @if [ -f .env ]; then \
         export $(cat .env | grep -v '^#' | xargs) && \
         AWS_ACCESS_KEY_ID="${DO_ACCESS_KEY}" AWS_SECRET_ACCESS_KEY="${DO_SECRET_KEY}" \
-        aptly -config=configs/aptly.conf publish update -distribution={{distribution}} -gpg-key="${GPG_KEY_ID}" s3:do-spaces:{{distribution}}; \
+        aptly -config=configs/aptly.conf publish update -gpg-key="${GPG_KEY_ID}" {{distribution}} s3:do-spaces:; \
     else \
         echo "Error: .env file not found. Please create it with DO_ACCESS_KEY and DO_SECRET_KEY"; \
         exit 1; \
@@ -219,46 +207,26 @@ repo-sync-remote remote_path:
     rsync -avz --delete ./public/ {{remote_path}}
     @echo "Repository synced to remote server"
 
-# Full release workflow with version management
-release-new type="patch":
-    @echo "Starting new release..."
+# Complete release workflow (build, package, and publish)
+release type="patch":
+    @echo "🚀 Starting automated release workflow..."
     @just version-check
     @echo ""
-    @echo "Step 1: Bumping version ({{type}})..."
-    @just version-bump {{type}}
-    @echo ""
-    @echo "Step 2: Building and packaging..."
+    @echo "📦 Building and packaging..."
     @just package-amd64
     @echo ""
-    @echo "Step 3: Please commit and tag:"
-    @echo "  git add -A"
-    @echo "  git commit -m 'Release v{{version}}'"
-    @echo "  just version-tag"
-    @echo "  git push origin main"
-    @echo "  git push origin v{{version}}"
+    @echo "📤 Updating repository..."
+    @just repo-update-s3
     @echo ""
-    @echo "Step 4: Then publish:"
-    @echo "  just repo-add-amd64"
-    @echo "  just repo-publish-s3"
+    @echo "✅ Release v{{version}} completed successfully!"
+    @echo ""
+    @echo "📊 Release Summary:"
+    @echo "  Version: {{version}}"
+    @echo "  Package: {{binary_name}}_{{version}}_amd64.deb"
+    @echo "  Repository: https://gentility.sgp1.digitaloceanspaces.com/debian/"
 
-# Publish tagged release (after committing and tagging)
-release-publish:
-    @if [ "{{git_clean}}" != "clean" ]; then \
-        echo "ERROR: Uncommitted changes detected."; \
-        exit 1; \
-    fi
-    @if [ "v{{version}}" != "{{latest_tag}}" ]; then \
-        echo "ERROR: Version {{version}} is not tagged yet!"; \
-        echo "Run 'just version-tag' first."; \
-        exit 1; \
-    fi
-    @echo "Publishing release v{{version}}..."
-    just repo-add-amd64
-    just repo-publish-s3
-    @echo "✅ Release v{{version}} published successfully!"
-
-# Legacy release command
-release repo_name="gentility-main" distribution="stable": package (repo-update repo_name distribution)
+# Legacy release command (renamed to avoid conflict)
+release-legacy repo_name="gentility-main" distribution="stable": package (repo-update repo_name distribution)
     @echo "Full release completed!"
 
 # Clean build artifacts
@@ -285,62 +253,80 @@ install-tools:
     @which nfpm >/dev/null || (echo "Installing nfpm..." && curl -sfL https://install.goreleaser.com/github.com/goreleaser/nfpm.sh | sh -s -- -b ~/.local/bin)
     @which aptly >/dev/null || (echo "Please install aptly: apt-get install aptly"; exit 1)
 
-# Check version status
+# Check version status and update if source changed
 version-check:
     @echo "Version Status:"
-    @echo "  Current version in code: {{version}}"
-    @echo "  Latest git tag: {{latest_tag}}"
-    @if [ "{{git_clean}}" != "clean" ]; then \
-        echo "  ⚠️  WARNING: Uncommitted changes detected!"; \
-        echo "  Please commit your changes before building a release."; \
-    fi
-    @if [ "v{{version}}" = "{{latest_tag}}" ]; then \
-        echo "  ⚠️  WARNING: Version {{version}} has already been tagged!"; \
-        echo "  Run 'just version-bump' to increment the version."; \
+    @echo "  Current version: {{version}}"
+    @echo "  Current source hash: {{current_hash}}"
+    @echo "  Lockfile hash: {{lockfile_hash}}"
+    @if [ "{{current_hash}}" != "{{lockfile_hash}}" ]; then \
+        echo "  🔄 Source has changed - version needs to be updated"; \
+        echo "  Run 'just version-update' to increment version"; \
     else \
-        echo "  ✅ Version {{version}} is new and ready to build."; \
+        echo "  ✅ Version {{version}} is up to date with source"; \
     fi
 
-# Bump version (patch, minor, or major)
-version-bump type="patch":
-    @echo "Bumping version ({{type}})..."
+# Update version automatically when source changes
+version-update type="patch":
+    @echo "Checking if version update is needed..."
+    @if [ "{{current_hash}}" = "{{lockfile_hash}}" ]; then \
+        echo "  ✅ Source hasn't changed, no version update needed"; \
+        exit 0; \
+    fi
+    @echo "  🔄 Source has changed, incrementing version..."
     @current_version={{version}}; \
     IFS='.' read -r major minor patch <<< "$current_version"; \
     if [ "{{type}}" = "major" ]; then \
-        new_version="$$((major + 1)).0.0"; \
+        new_version="$((major + 1)).0.0"; \
     elif [ "{{type}}" = "minor" ]; then \
-        new_version="$$major.$$((minor + 1)).0"; \
+        new_version="$major.$((minor + 1)).0"; \
     else \
-        new_version="$$major.$$minor.$$((patch + 1))"; \
+        new_version="$major.$minor.$((patch + 1))"; \
     fi; \
-    echo "Updating version from $$current_version to $$new_version"; \
-    sed -i '' "s/VERSION = \"$$current_version\"/VERSION = \"$$new_version\"/" src/agent.cr; \
-    sed -i '' "s/version: \"$$current_version\"/version: \"$$new_version\"/" nfpm.yaml nfpm-arm64.yaml 2>/dev/null || true; \
-    echo "Version updated to $$new_version"; \
-    echo "Run 'just version-tag' after committing to create the git tag"
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ"); \
+    echo "  📝 Updating version from $current_version to $new_version"; \
+    sed -i '' "s/VERSION = \"$current_version\"/VERSION = \"$new_version\"/" src/agent.cr; \
+    sed -i '' "s/version: \"$current_version\"/version: \"$new_version\"/" nfpm.yaml nfpm-arm64.yaml 2>/dev/null || true; \
+    old_entry=$(cat .version-lock.json 2>/dev/null | jq -c '{version: .current_version, hash: .source_hash, timestamp: .last_updated}' 2>/dev/null || echo '{}'); \
+    cat .version-lock.json 2>/dev/null | jq --arg version "$$new_version" --arg hash "{{current_hash}}" --arg timestamp "$$timestamp" --argjson old "$$old_entry" \
+        '.current_version = $version | .source_hash = $hash | .last_updated = $timestamp | .history = ((.history // []) + [$old])[-10:]' > .version-lock.json.tmp && mv .version-lock.json.tmp .version-lock.json || \
+    echo "{\"current_version\": \"$new_version\", \"source_hash\": \"{{current_hash}}\", \"last_updated\": \"$timestamp\", \"history\": []}" | jq . > .version-lock.json; \
+    echo "  ✅ Version updated to $new_version and lockfile saved"
 
-# Create git tag for current version
-version-tag:
-    @if [ "{{git_clean}}" != "clean" ]; then \
-        echo "ERROR: Uncommitted changes detected. Please commit first."; \
-        exit 1; \
-    fi
-    @if [ "v{{version}}" = "{{latest_tag}}" ]; then \
-        echo "ERROR: Version {{version}} is already tagged!"; \
-        exit 1; \
-    fi
-    git tag -a "v{{version}}" -m "Release version {{version}}"
-    @echo "Tagged version {{version}}"
-    @echo "Run 'git push origin v{{version}}' to push the tag"
+# Force version bump (manual override)
+version-bump type="patch":
+    @echo "Manually bumping version ({{type}})..."
+    @current_version={{version}}; \
+    IFS='.' read -r major minor patch <<< "$current_version"; \
+    if [ "{{type}}" = "major" ]; then \
+        new_version="$((major + 1)).0.0"; \
+    elif [ "{{type}}" = "minor" ]; then \
+        new_version="$major.$((minor + 1)).0"; \
+    else \
+        new_version="$major.$minor.$((patch + 1))"; \
+    fi; \
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ"); \
+    echo "  📝 Updating version from $current_version to $new_version"; \
+    sed -i '' "s/VERSION = \"$current_version\"/VERSION = \"$new_version\"/" src/agent.cr; \
+    sed -i '' "s/version: \"$current_version\"/version: \"$new_version\"/" nfpm.yaml nfpm-arm64.yaml 2>/dev/null || true; \
+    old_entry=$(cat .version-lock.json 2>/dev/null | jq -c '{version: .current_version, hash: .source_hash, timestamp: .last_updated}' 2>/dev/null || echo '{}'); \
+    cat .version-lock.json 2>/dev/null | jq --arg version "$$new_version" --arg hash "{{current_hash}}" --arg timestamp "$$timestamp" --argjson old "$$old_entry" \
+        '.current_version = $version | .source_hash = $hash | .last_updated = $timestamp | .history = ((.history // []) + [$old])[-10:]' > .version-lock.json.tmp && mv .version-lock.json.tmp .version-lock.json || \
+    echo "{\"current_version\": \"$new_version\", \"source_hash\": \"{{current_hash}}\", \"last_updated\": \"$timestamp\", \"history\": []}" | jq . > .version-lock.json; \
+    echo "  ✅ Version bumped to $new_version"
 
 # Show build information
 info:
     @echo "Build Information:"
     @echo "  Binary name: {{binary_name}}"
-    @echo "  Current version in code: {{version}}"
-    @echo "  Latest git tag: {{latest_tag}}"
-    @echo "  Git commit: {{git_hash}}"
-    @echo "  Git status: {{git_clean}}"
+    @echo "  Current version: {{version}}"
+    @echo "  Source hash: {{current_hash}}"
+    @echo "  Lockfile hash: {{lockfile_hash}}"
+    @if [ "{{current_hash}}" != "{{lockfile_hash}}" ]; then \
+        echo "  Status: 🔄 Source changed, version will be updated on next build"; \
+    else \
+        echo "  Status: ✅ Up to date"; \
+    fi
     @echo ""
     @echo "Available binaries:"
     @ls -lh {{bin_dir}}/{{binary_name}}-* 2>/dev/null || echo "  No binaries built yet"
