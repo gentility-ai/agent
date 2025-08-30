@@ -172,7 +172,8 @@ repo-publish-s3 repo_name="gentility-main" distribution="stable":
     @if [ -f .env ]; then \
         export $(cat .env | grep -v '^#' | xargs) && \
         AWS_ACCESS_KEY_ID="${DO_ACCESS_KEY}" AWS_SECRET_ACCESS_KEY="${DO_SECRET_KEY}" \
-        aptly -config=configs/aptly.conf publish repo -distribution={{distribution}} -gpg-key="${GPG_KEY_ID}" {{repo_name}} s3:do-spaces:; \
+        aptly -config=configs/aptly.conf publish repo -distribution={{distribution}} -gpg-key="${GPG_KEY_ID}" {{repo_name}} s3:do-spaces: && \
+        just upload-gpg-key; \
     else \
         echo "Error: .env file not found. Please create it with DO_ACCESS_KEY and DO_SECRET_KEY"; \
         exit 1; \
@@ -204,11 +205,27 @@ repo-update-s3 repo_name="gentility-main" distribution="stable":
         export $(cat .env | grep -v '^#' | xargs)
         AWS_ACCESS_KEY_ID="${DO_ACCESS_KEY}" AWS_SECRET_ACCESS_KEY="${DO_SECRET_KEY}" \
         aptly -config=configs/aptly.conf publish update -gpg-key="${GPG_KEY_ID}" {{distribution}} s3:do-spaces:
+        
+        # Ensure GPG key is always available
+        just upload-gpg-key
     else
         echo "Error: .env file not found. Please create it with DO_ACCESS_KEY and DO_SECRET_KEY"
         exit 1
     fi
     echo "DO Spaces repository updated"
+
+# Upload GPG key to Digital Ocean Spaces root
+upload-gpg-key:
+    @echo "Uploading GPG key to DO Spaces..."
+    @if [ -f .env ] && [ -f gentility-packages.gpg ]; then \
+        export $(cat .env | grep -v '^#' | xargs) && \
+        AWS_ACCESS_KEY_ID="${DO_ACCESS_KEY}" AWS_SECRET_ACCESS_KEY="${DO_SECRET_KEY}" \
+        aws s3 cp gentility-packages.gpg s3://gentility/gentility-packages.gpg --endpoint-url=https://sgp1.digitaloceanspaces.com --acl public-read; \
+    else \
+        echo "Error: .env file or gentility-packages.gpg not found"; \
+        exit 1; \
+    fi
+    @echo "GPG key uploaded to https://gentility.sgp1.digitaloceanspaces.com/gentility-packages.gpg"
 
 # Sync local repository to remote server via rsync
 repo-sync-remote remote_path:

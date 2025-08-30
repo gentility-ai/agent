@@ -27,8 +27,8 @@ require "uri"
 require "process"
 require "file"
 
-# MAKE SURE YOU UPDATE THIS VERSION IF YOU CHANGE THIS FILE
-VERSION = "1.0.16"
+# ALWAYS UPDATE THIS VERSION IF YOU CHANGE THIS FILE
+VERSION = "1.0.18"
 
 class GentilityAgent
   @websocket : HTTP::WebSocket?
@@ -49,6 +49,7 @@ class GentilityAgent
     puts "Environment: #{@environment}"
     puts "Server: #{@server_url}"
     puts "Debug mode: #{@debug ? "enabled" : "disabled"}"
+    puts ""
     puts ""
 
     @running = true

@@ -26,11 +26,12 @@ Tested on Ubuntu 20.04+, Debian 11+, CentOS 8+, and other modern Linux distribut
 Add the Gentility AI package repository to your system:
 
 ```bash
-# Add GPG key for package verification
-curl -s https://gentility.sgp1.digitaloceanspaces.com/gentility-packages.gpg | sudo apt-key add -
+# Add GPG key for package verification (modern method)
+sudo mkdir -p /etc/apt/keyrings
+curl -s https://gentility.sgp1.digitaloceanspaces.com/gentility-packages.gpg | sudo tee /etc/apt/keyrings/gentility-packages.asc > /dev/null
 
-# Add repository
-echo "deb https://gentility.sgp1.digitaloceanspaces.com/debian/ stable main" | sudo tee /etc/apt/sources.list.d/gentility.list
+# Add repository with signed-by specification
+echo "deb [signed-by=/etc/apt/keyrings/gentility-packages.asc] https://gentility.sgp1.digitaloceanspaces.com/debian/ stable main" | sudo tee /etc/apt/sources.list.d/gentility.list
 
 # Update package list and install
 sudo apt update
