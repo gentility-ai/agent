@@ -53,6 +53,29 @@ sudo dpkg -i gentility-agent_1.0.0_amd64.deb
 sudo apt-get install -f
 ```
 
+### Option 3: Build from Source
+
+Build and install from the official source code:
+
+```bash
+# Install Crystal language (if not already installed)
+curl -fsSL https://crystal-lang.org/install.sh | sudo bash
+
+# Clone the source repository
+git clone https://github.com/gentility-ai/agent.git
+cd agent
+
+# Install dependencies
+shards install
+
+# Build the binary
+crystal build src/agent.cr --release --static -o gentility-agent
+
+# Install manually (optional)
+sudo cp gentility-agent /usr/local/bin/gentility-agent
+sudo chmod +x /usr/local/bin/gentility-agent
+```
+
 ## Quick Start
 
 After installation, you need to configure the agent with your access token:
@@ -68,9 +91,6 @@ sudo nano /etc/gentility.conf
 **Required configuration:**
 ```bash
 GENTILITY_TOKEN="your-access-token-here"
-SERVER_URL="wss://api.gentility.ai"
-NICKNAME="my-server"
-ENVIRONMENT="prod"
 ```
 
 Start the service:
@@ -85,26 +105,18 @@ sudo systemctl status gentility-agent
 
 ## Configuration
 
-The agent is configured through `/etc/gentility.conf`. All options can also be set via environment variables or command line arguments.
+The agent is configured through `/etc/gentility.conf`.
 
-### Configuration File Options
+### Configuration File
 
-| Option | Description | Default | Required |
-|--------|-------------|---------|----------|
-| `GENTILITY_TOKEN` | Your access token from Gentility AI | - | ✅ |
-| `SERVER_URL` | Gentility AI server endpoint | `wss://api.gentility.ai` | |
-| `NICKNAME` | Friendly name for this agent | hostname | |
-| `ENVIRONMENT` | Environment type | `prod` | |
-
-### Example Configuration
+The only required configuration is your access token:
 
 ```bash
 # /etc/gentility.conf
 GENTILITY_TOKEN="gnt_1234567890abcdef"
-SERVER_URL="wss://api.gentility.ai"
-NICKNAME="production-web-server"
-ENVIRONMENT="prod"
 ```
+
+Get your access token from your Gentility AI dashboard.
 
 ## Service Management
 
