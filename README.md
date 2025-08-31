@@ -78,22 +78,29 @@ sudo chmod +x /usr/local/bin/gentility-agent
 
 ## Quick Start
 
-After installation, you need to configure the agent with your access token:
+After installation, configure the agent with your access token using the setup command:
 
 ```bash
-# Copy the example configuration
-sudo cp /etc/gentility.conf.example /etc/gentility.conf
+# Quick setup (recommended)
+sudo gentility-agent setup YOUR_TOKEN_HERE
+```
 
-# Edit the configuration with your details
+Or manually edit the configuration:
+
+```bash
+# Manual setup
+sudo cp /etc/gentility.conf.example /etc/gentility.conf
 sudo nano /etc/gentility.conf
 ```
 
 **Required configuration:**
+
 ```bash
 GENTILITY_TOKEN="your-access-token-here"
 ```
 
 Start the service:
+
 ```bash
 # Start and enable the service
 sudo systemctl start gentility-agent
@@ -145,6 +152,7 @@ sudo journalctl -u gentility-agent --since="1 hour ago"
 ### Common Issues
 
 **Service won't start:**
+
 ```bash
 # Check configuration file
 sudo cat /etc/gentility.conf
@@ -154,6 +162,7 @@ sudo journalctl -u gentility-agent --no-pager
 ```
 
 **Connection issues:**
+
 ```bash
 # Test connectivity (if server is reachable)
 curl -I https://api.gentility.ai
@@ -163,6 +172,7 @@ sudo ufw status
 ```
 
 **Authentication errors:**
+
 - Verify your `GENTILITY_TOKEN` is correct
 - Check that the token hasn't expired
 - Ensure the token has appropriate permissions
