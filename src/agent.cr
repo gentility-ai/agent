@@ -28,7 +28,7 @@ require "process"
 require "file"
 
 # ALWAYS UPDATE THIS VERSION IF YOU CHANGE THIS FILE
-VERSION = "1.0.18"
+VERSION = "1.0.19"
 
 class GentilityAgent
   @websocket : HTTP::WebSocket?
@@ -279,9 +279,11 @@ class GentilityAgent
       port = params.try(&.["port"]?.try(&.as_i?))
       dbname = params.try(&.["dbname"]?.try(&.to_s))
       query = params.try(&.["query"]?.try(&.to_s))
+      username = params.try(&.["user"]?.try(&.to_s)) || params.try(&.["username"]?.try(&.to_s))
+      password = params.try(&.["password"]?.try(&.to_s))
 
       if host && port && dbname && query
-        execute_psql_query(host, port, dbname, query)
+        execute_psql_query(host, port, dbname, query, username, password)
       else
         {"error" => "Missing required parameters: host, port, dbname, query"}
       end
@@ -402,14 +404,18 @@ class GentilityAgent
     {"error" => "Failed to write file: #{ex.message}"}
   end
 
-  private def execute_psql_query(host : String, port : Int32, dbname : String, query : String)
+  private def execute_psql_query(host : String, port : Int32, dbname : String, query : String, username : String?, password : String?)
     puts "Executing PostgreSQL query on #{host}:#{port}/#{dbname}"
     puts "Query: #{query}"
 
     begin
       # Use psql with environment variable to avoid password prompt
       escaped_query = query.gsub("\"", "\\\"").gsub("`", "\\`").gsub("$", "\\$")
-      psql_cmd = "PGPASSWORD='' psql -h #{host} -p #{port} -d #{dbname} -t -A -c \"#{escaped_query}\""
+
+      # Build the psql command with proper authentication
+      psql_cmd = "PGPASSWORD='#{password || ""}' psql -h #{host} -p #{port}"
+      psql_cmd += " -U #{username}" if username
+      psql_cmd += " -d #{dbname} -t -A -c \"#{escaped_query}\""
 
       execute_db_command(psql_cmd, "|", "PostgreSQL")
     rescue ex : Exception
