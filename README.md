@@ -108,6 +108,9 @@ sudo systemctl enable gentility-agent
 
 # Check status
 sudo systemctl status gentility-agent
+
+# View real-time logs
+sudo journalctl -u gentility-agent -f
 ```
 
 ## Configuration

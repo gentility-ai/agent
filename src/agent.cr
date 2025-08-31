@@ -28,7 +28,7 @@ require "process"
 require "file"
 
 # ALWAYS UPDATE THIS VERSION IF YOU CHANGE THIS FILE
-VERSION = "1.0.19"
+VERSION = "1.0.20"
 
 class GentilityAgent
   @websocket : HTTP::WebSocket?
@@ -645,12 +645,62 @@ rescue ex : Exception
 end
 
 def parse_arguments
+  # 1. Start with defaults
   access_key = nil
   server_url = "ws://localhost:9000"
   nickname = `hostname`.strip
   environment = "prod"
   debug = false
 
+  # 2. Load configuration from file if it exists
+  config_file = "/etc/gentility.conf"
+  config = load_config_from_file(config_file) || {} of String => String
+
+  # Apply config file settings
+  if config["GENTILITY_TOKEN"]? || config["ACCESS_KEY"]?
+    access_key = config["GENTILITY_TOKEN"]? || config["ACCESS_KEY"]?
+  end
+
+  if config["SERVER_URL"]?
+    server_url = config["SERVER_URL"]
+  end
+
+  if config["NICKNAME"]?
+    nickname = config["NICKNAME"]
+  end
+
+  if config["ENVIRONMENT"]?
+    environment = config["ENVIRONMENT"]
+  end
+
+  if config["DEBUG"]?
+    debug_val = config["DEBUG"].downcase
+    debug = (debug_val == "true" || debug_val == "1" || debug_val == "yes")
+  end
+
+  # 3. Override with environment variables (systemd loads config as env vars too)
+  if ENV["GENTILITY_TOKEN"]?
+    access_key = ENV["GENTILITY_TOKEN"]
+  end
+
+  if ENV["SERVER_URL"]?
+    server_url = ENV["SERVER_URL"]
+  end
+
+  if ENV["NICKNAME"]?
+    nickname = ENV["NICKNAME"]
+  end
+
+  if ENV["ENVIRONMENT"]?
+    environment = ENV["ENVIRONMENT"]
+  end
+
+  if ENV["DEBUG"]?
+    debug_env = ENV["DEBUG"].downcase
+    debug = (debug_env == "true" || debug_env == "1" || debug_env == "yes")
+  end
+
+  # 4. Override with CLI arguments (highest priority)
   # Check for --token and --debug arguments
   ARGV.each_with_index do |arg, index|
     if arg.starts_with?("--token=")
@@ -660,14 +710,10 @@ def parse_arguments
     end
   end
 
-  # If not found in arguments, check environment
-  if access_key.nil?
-    access_key = ENV["GENTILITY_TOKEN"]?
-  end
-
-  # Check for other arguments (for backward compatibility)
+  # Check for legacy positional arguments (backward compatibility)
   non_token_args = ARGV.reject { |arg| arg.starts_with?("--token=") || arg == "--debug" }
-  if non_token_args.size > 0 && access_key.nil?
+
+  if non_token_args.size > 0 && !ARGV.any? { |arg| arg.starts_with?("--token=") }
     access_key = non_token_args[0]
   end
 
@@ -682,15 +728,6 @@ def parse_arguments
   if non_token_args.size > 3
     environment = non_token_args[3]
   end
-
-  # Load configuration from file if it exists (can be overridden by args/env)
-  config_file = "/etc/gentility.conf"
-  config = load_config_from_file(config_file) || {} of String => String
-
-  access_key = access_key || config["ACCESS_KEY"]? || config["GENTILITY_TOKEN"]?
-  server_url = server_url == "ws://localhost:9000" ? (config["SERVER_URL"]? || server_url) : server_url
-  nickname = nickname == `hostname`.strip ? (config["NICKNAME"]? || nickname) : nickname
-  environment = environment == "prod" ? (config["ENVIRONMENT"]? || environment) : environment
 
   unless access_key
     puts "ERROR: No access token provided!"
