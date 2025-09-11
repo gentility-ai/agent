@@ -9,5 +9,9 @@ dependencies:
   msgpack:
     github: crystal-community/msgpack-crystal
     version: ~> 1.0
+  crotp:
+    github: philnash/crotp
+  qr-code:
+    github: spider-gazelle/qr-code
 
 crystal: ">= 1.0.0"
