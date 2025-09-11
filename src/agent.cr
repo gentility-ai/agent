@@ -26,9 +26,167 @@ require "msgpack"
 require "uri"
 require "process"
 require "file"
+require "crotp"
+require "qr-code"
 
 # ALWAYS UPDATE THIS VERSION IF YOU CHANGE THIS FILE
-VERSION = "1.0.20"
+VERSION = "1.0.21"
+
+# Global security state management
+module Security
+  @@mode : String = "none"
+  @@password : String? = nil
+  @@totp_secret : String? = nil
+  @@activation_timeout : Int32 = 1800
+  @@extendable : Bool = true
+  @@active : Bool = false
+  @@activation_time : Time? = nil
+  @@initial_activation_time : Time? = nil
+  @@promiscuous_enabled : Bool = true
+  @@promiscuous_auth_mode : String = "password"
+
+  def self.configure(mode : String, password : String?, totp_secret : String?, timeout : Int32, extendable : Bool, promiscuous_enabled : Bool = true, promiscuous_auth_mode : String = "password")
+    @@mode = mode
+    @@password = password
+    @@totp_secret = totp_secret
+    @@activation_timeout = timeout
+    @@extendable = extendable
+    @@promiscuous_enabled = promiscuous_enabled
+    @@promiscuous_auth_mode = promiscuous_auth_mode
+  end
+
+  def self.mode
+    @@mode
+  end
+
+  def self.activated?
+    return true if @@mode == "none"
+    
+    return false unless @@active
+
+    now = Time.utc
+    return false unless @@activation_time && @@initial_activation_time
+
+    # Check if we've exceeded the hard timeout from initial activation
+    if now - @@initial_activation_time.not_nil! > @@activation_timeout.seconds
+      deactivate
+      return false
+    end
+
+    # If extendable, also check the rolling timeout
+    if @@extendable && now - @@activation_time.not_nil! > @@activation_timeout.seconds
+      deactivate
+      return false
+    end
+
+    true
+  end
+
+  def self.activate(password_or_totp : String) : Bool
+    return true if @@mode == "none"
+
+    success = case @@mode
+              when "password"
+                @@password && password_or_totp == @@password
+              when "totp"
+                validate_totp(password_or_totp)
+              else
+                false
+              end
+
+    if success
+      now = Time.utc
+      @@active = true
+      @@activation_time = now
+      @@initial_activation_time = now unless @@initial_activation_time
+    end
+
+    !!success
+  end
+
+  def self.extend_activation
+    return unless @@active && @@extendable
+    @@activation_time = Time.utc
+  end
+
+  def self.deactivate
+    @@active = false
+    @@activation_time = nil
+    @@initial_activation_time = nil
+  end
+
+  def self.time_remaining : Int32
+    return -1 if @@mode == "none" || !@@active
+    return 0 unless @@activation_time && @@initial_activation_time
+
+    now = Time.utc
+    initial_elapsed = (now - @@initial_activation_time.not_nil!).total_seconds.to_i
+    hard_remaining = @@activation_timeout - initial_elapsed
+
+    if @@extendable
+      rolling_elapsed = (now - @@activation_time.not_nil!).total_seconds.to_i
+      rolling_remaining = @@activation_timeout - rolling_elapsed
+      [hard_remaining, rolling_remaining].min
+    else
+      hard_remaining
+    end
+  end
+
+  def self.status
+    {
+      "security_enabled" => @@mode != "none",
+      "security_mode"    => @@mode,
+      "active"           => activated?,
+      "time_remaining"   => time_remaining,
+      "extendable"       => @@extendable,
+    }
+  end
+
+  def self.validate_promiscuous_auth(credential : String) : Bool
+    return false unless @@promiscuous_enabled
+    
+    success = case @@promiscuous_auth_mode
+              when "password"
+                @@password && credential == @@password
+              when "totp"
+                validate_totp(credential)
+              else
+                false
+              end
+    
+    !!success
+  end
+
+  def self.promiscuous_enabled?
+    @@promiscuous_enabled
+  end
+
+  def self.export_config
+    {
+      "success" => true,
+      "security_config" => {
+        "mode" => @@mode,
+        "password" => @@password,
+        "totp_secret" => @@totp_secret,
+        "timeout" => @@activation_timeout,
+        "extendable" => @@extendable,
+        "promiscuous_enabled" => @@promiscuous_enabled,
+        "promiscuous_auth_mode" => @@promiscuous_auth_mode
+      }
+    }
+  end
+
+  private def self.validate_totp(code : String) : Bool
+    return false unless @@totp_secret
+
+    begin
+      totp = CrOTP::TOTP.new(@@totp_secret.not_nil!)
+      totp.verify(code)
+    rescue
+      false
+    end
+  end
+end
 
 class GentilityAgent
   @websocket : HTTP::WebSocket?
@@ -41,6 +199,69 @@ class GentilityAgent
   @debug : Bool = false
 
   def initialize(@access_key : String, @server_url : String, @nickname : String, @environment : String = "prod", @debug : Bool = false)
+    load_security_config
+  end
+
+  private def load_security_config
+    config_file = "/etc/gentility.conf"
+    config = load_config_from_file(config_file) || {} of String => String
+
+    mode = config["SECURITY_MODE"]? || "none"
+    password = config["SECURITY_PASSWORD"]?
+    totp_secret = config["SECURITY_TOTP_SECRET"]?
+    timeout = config["SECURITY_ACTIVATION_TIMEOUT"]?.try(&.to_i?) || 1800
+    extendable = parse_boolean(config["SECURITY_EXTENDABLE"]?, true)
+    promiscuous_enabled = parse_boolean(config["PROMISCUOUS_ENABLED"]?, true)
+    promiscuous_auth_mode = config["PROMISCUOUS_AUTH_MODE"]? || "password"
+
+    Security.configure(mode, password, totp_secret, timeout, extendable, promiscuous_enabled, promiscuous_auth_mode)
+  end
+
+  private def parse_boolean(value : String?, default : Bool) : Bool
+    return default unless value
+    case value.downcase
+    when "true", "1", "yes", "on"
+      true
+    when "false", "0", "no", "off"
+      false
+    else
+      default
+    end
+  end
+
+  private def save_security_config(mode : String, password : String?, totp_secret : String?, timeout : Int32, extendable : Bool)
+    config_file = "/etc/gentility.conf"
+    
+    # Read existing config
+    existing_config = [] of String
+    if File.exists?(config_file)
+      existing_config = File.read_lines(config_file)
+    end
+
+    # Update or add security settings
+    updated_config = [] of String
+    security_keys = ["SECURITY_MODE", "SECURITY_PASSWORD", "SECURITY_TOTP_SECRET", "SECURITY_ACTIVATION_TIMEOUT", "SECURITY_EXTENDABLE"]
+    
+    existing_config.each do |line|
+      # Skip existing security lines - we'll add new ones
+      next if security_keys.any? { |key| line.starts_with?("#{key}=") || line.starts_with?("##{key}=") }
+      updated_config << line
+    end
+
+    # Add new security configuration
+    updated_config << ""
+    updated_config << "# Security configuration (updated remotely)"
+    updated_config << "SECURITY_MODE=#{mode}"
+    updated_config << "SECURITY_PASSWORD=#{password}" if password
+    updated_config << "SECURITY_TOTP_SECRET=#{totp_secret}" if totp_secret
+    updated_config << "SECURITY_ACTIVATION_TIMEOUT=#{timeout}"
+    updated_config << "SECURITY_EXTENDABLE=#{extendable}"
+
+    # Write updated config
+    File.write(config_file, updated_config.join("\n") + "\n")
+    File.chmod(config_file, 0o600)
+  rescue ex : Exception
+    puts "Warning: Could not save security configuration to file: #{ex.message}"
   end
 
   def start
@@ -122,6 +343,9 @@ class GentilityAgent
       query: URI::Params.build do |params|
         params.add "access_key", @access_key
         params.add "version", VERSION
+        params.add "security_mode", Security.mode
+        params.add "security_enabled", (Security.mode != "none").to_s
+        params.add "security_active", Security.activated?.to_s
       end
     )
 
@@ -196,8 +420,10 @@ class GentilityAgent
       server_target_id = msg["server_target_id"]?.try(&.to_s)
       puts "Server Target ID: #{server_target_id}" if server_target_id
     when "ping"
-      # Respond to ping
-      send_message({"type" => "pong", "timestamp" => Time.utc.to_unix_f})
+      # Respond to ping with security status
+      response = {"type" => "pong", "timestamp" => Time.utc.to_unix_f}
+      response = response.merge(Security.status)
+      send_message(response)
     when "pong"
       # Handle pong response (server responding to our ping)
       timestamp = msg["timestamp"]?.try(&.as_f?)
@@ -253,6 +479,8 @@ class GentilityAgent
         {"error" => "Missing capabilities parameter"}
       end
     when "execute"
+      return {"error" => "Agent activation required for command execution"} unless Security.activated?
+      Security.extend_activation
       cmd = params.try(&.["command"]?.try(&.to_s))
       if cmd
         execute_shell_command(cmd)
@@ -275,6 +503,8 @@ class GentilityAgent
         {"error" => "Missing path or content parameter"}
       end
     when "psql_query"
+      return {"error" => "Agent activation required for database queries"} unless Security.activated?
+      Security.extend_activation
       host = params.try(&.["host"]?.try(&.to_s))
       port = params.try(&.["port"]?.try(&.as_i?))
       dbname = params.try(&.["dbname"]?.try(&.to_s))
@@ -288,6 +518,8 @@ class GentilityAgent
         {"error" => "Missing required parameters: host, port, dbname, query"}
       end
     when "mysql_query"
+      return {"error" => "Agent activation required for database queries"} unless Security.activated?
+      Security.extend_activation
       host = params.try(&.["host"]?.try(&.to_s))
       port = params.try(&.["port"]?.try(&.as_i?))
       dbname = params.try(&.["dbname"]?.try(&.to_s))
@@ -297,6 +529,46 @@ class GentilityAgent
         execute_mysql_query(host, port, dbname, query)
       else
         {"error" => "Missing required parameters: host, port, dbname, query"}
+      end
+    when "activate"
+      credential = params.try(&.["credential"]?.try(&.to_s))
+      if credential
+        if Security.activate(credential)
+          {"success" => true, "message" => "Agent activated successfully"}
+        else
+          {"error" => "Invalid credentials"}
+        end
+      else
+        {"error" => "Missing credential parameter"}
+      end
+    when "lock"
+      Security.deactivate
+      {"success" => true, "message" => "Agent deactivated"}
+    when "export_security"
+      credential = params.try(&.["credential"]?.try(&.to_s))
+      if credential && Security.validate_promiscuous_auth(credential)
+        Security.export_config
+      else
+        {"error" => Security.promiscuous_enabled? ? "Invalid promiscuous credentials" : "Promiscuous mode disabled"}
+      end
+    when "configure_security"
+      # Only allow configuration if no security is currently set, or if already activated
+      if Security.mode == "none" || Security.activated?
+        mode = params.try(&.["mode"]?.try(&.to_s))
+        password = params.try(&.["password"]?.try(&.to_s))
+        totp_secret = params.try(&.["totp_secret"]?.try(&.to_s))
+        timeout = params.try(&.["timeout"]?.try(&.as_i?)) || 1800
+        extendable = params.try(&.["extendable"]?.try(&.as_bool?)) || true
+        
+        if mode && (mode == "none" || password || totp_secret)
+          Security.configure(mode, password, totp_secret, timeout, extendable)
+          save_security_config(mode, password, totp_secret, timeout, extendable)
+          {"success" => true, "message" => "Security configuration updated"}
+        else
+          {"error" => "Invalid security configuration parameters"}
+        end
+      else
+        {"error" => "Agent activation required to change security settings"}
       end
     else
       {"error" => "Unknown command: #{command}"}
@@ -521,6 +793,9 @@ class GentilityAgent
       "uptime"        => Time.monotonic.total_seconds,
       "timestamp"     => Time.utc.to_unix_f,
     }
+
+    # Merge security status
+    status = status.merge(Security.status)
 
     send_message({
       "type"   => "status",
@@ -792,10 +1067,341 @@ def setup_config(token : String)
   end
 end
 
+def generate_totp_secret(length : Int32 = 32) : String
+  # Generate a random base32 secret
+  chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+  secret = ""
+  length.times do
+    secret += chars[Random.rand(chars.size)]
+  end
+  secret
+end
+
+def generate_qr_ascii(text : String) : String
+  begin
+    # Use pure Crystal QR code library - no external dependencies!
+    # Try different sizes until one works for the URL length
+    qr = nil
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].each do |size|
+      begin
+        qr = QRCode.new(text, size: size, level: :l) # Use low error correction for more data
+        break
+      rescue
+        next
+      end
+    end
+    
+    unless qr
+      return "QR Code too complex for display.\nManual entry URL: #{text}"
+    end
+    
+    output = String.build do |str|
+      qr.modules.each do |row|
+        row.each do |col|
+          # Use ANSI background colors for better visibility
+          if col
+            str << "\033[40m  " # Black background (QR module)
+          else
+            str << "\033[47m  " # White background (empty space)
+          end
+        end
+        str << "\033[0m\n" # Reset color and newline
+      end
+    end
+    output
+  rescue ex : Exception
+    # Fallback if QR generation fails
+    "QR Code generation failed: #{ex.message}\nManual entry URL: #{text}"
+  end
+end
+
+def setup_security(mode : String, value : String? = nil)
+  config_file = "/etc/gentility.conf"
+  
+  case mode
+  when "totp"
+    # Generate TOTP secret if not provided
+    secret = value || generate_totp_secret
+    
+    puts "🔐 TOTP Security Setup"
+    puts "===================="
+    puts ""
+    puts "Your TOTP secret: #{secret}"
+    puts ""
+    puts "Add this to your authenticator app by scanning the QR code below"
+    puts "or manually entering the secret."
+    puts ""
+    
+    # Generate QR code URL for authenticator apps (keep it short)
+    hostname = `hostname`.strip rescue "agent"
+    hostname = hostname[0...10] if hostname.size > 10 # Truncate long hostnames
+    issuer = "Gentility"
+    totp_url = "otpauth://totp/#{issuer}:#{hostname}?secret=#{secret}&issuer=#{issuer}"
+    
+    puts "Authenticator URL:"
+    puts totp_url
+    puts ""
+    
+    # Generate ASCII QR code
+    puts "QR Code:"
+    puts generate_qr_ascii(totp_url)
+    puts ""
+    
+    # Update config file
+    update_config(config_file, "SECURITY_MODE", "totp")
+    update_config(config_file, "SECURITY_TOTP_SECRET", secret)
+    
+  when "password"
+    password = value
+    unless password
+      print "Enter password: "
+      password = gets.try(&.strip)
+    end
+    
+    unless password && !password.empty?
+      puts "❌ Error: Password cannot be empty"
+      exit 1
+    end
+    
+    puts "🔐 Password Security Setup"
+    puts "========================"
+    puts "Security mode set to password authentication."
+    puts ""
+    
+    # Update config file  
+    update_config(config_file, "SECURITY_MODE", "password")
+    update_config(config_file, "SECURITY_PASSWORD", password)
+    
+  when "none"
+    puts "🔐 Security Disabled"
+    puts "==================="
+    puts "Security mode set to none - no authentication required."
+    puts ""
+    
+    update_config(config_file, "SECURITY_MODE", "none")
+    remove_config(config_file, ["SECURITY_PASSWORD", "SECURITY_TOTP_SECRET"])
+  else
+    puts "❌ Error: Invalid security mode. Use: totp, password, or none"
+    exit 1
+  end
+  
+  puts "✅ Security configuration saved to #{config_file}"
+  puts ""
+  puts "Restart the agent to apply new security settings:"
+  puts "  sudo systemctl restart gentility-agent"
+  
+  exit 0
+rescue ex : Exception
+  puts "❌ Error: #{ex.message}"
+  exit 1
+end
+
+def update_config(config_file : String, key : String, value : String)
+  lines = [] of String
+  found = false
+  
+  if File.exists?(config_file)
+    File.each_line(config_file) do |line|
+      if line.starts_with?("#{key}=") || line.starts_with?("##{key}=")
+        lines << "#{key}=#{value}"
+        found = true
+      else
+        lines << line
+      end
+    end
+  end
+  
+  unless found
+    lines << "#{key}=#{value}"
+  end
+  
+  File.write(config_file, lines.join("\n") + "\n")
+  File.chmod(config_file, 0o600)
+end
+
+def remove_config(config_file : String, keys : Array(String))
+  return unless File.exists?(config_file)
+  
+  lines = [] of String
+  File.each_line(config_file) do |line|
+    # Skip lines for the specified keys
+    next if keys.any? { |key| line.starts_with?("#{key}=") || line.starts_with?("##{key}=") }
+    lines << line
+  end
+  
+  File.write(config_file, lines.join("\n") + "\n")
+  File.chmod(config_file, 0o600)
+end
+
+def test_totp_validation(code : String)
+  config_file = "/etc/gentility.conf"
+  config = load_config_from_file(config_file) || {} of String => String
+  
+  totp_secret = config["SECURITY_TOTP_SECRET"]?
+  mode = config["SECURITY_MODE"]?
+  
+  unless mode == "totp"
+    puts "❌ Error: TOTP mode is not configured"
+    puts "Run: #{PROGRAM_NAME} security totp"
+    exit 1
+  end
+  
+  unless totp_secret
+    puts "❌ Error: No TOTP secret found in configuration"
+    exit 1
+  end
+  
+  begin
+    totp = CrOTP::TOTP.new(totp_secret)
+    if totp.verify(code)
+      puts "✅ TOTP validation successful!"
+      puts "Code '#{code}' is valid for the configured secret."
+    else
+      puts "❌ TOTP validation failed!"
+      puts "Code '#{code}' is not valid. Check your authenticator app."
+    end
+  rescue ex : Exception
+    puts "❌ Error validating TOTP: #{ex.message}"
+    exit 1
+  end
+  
+  exit 0
+end
+
+def show_promiscuous_status
+  config_file = "/etc/gentility.conf"
+  config = load_config_from_file(config_file) || {} of String => String
+  
+  enabled = config["PROMISCUOUS_ENABLED"]? != "false"
+  auth_mode = config["PROMISCUOUS_AUTH_MODE"]? || "password"
+  
+  puts "🔐 Promiscuous Mode Status"
+  puts "========================="
+  puts "Enabled: #{enabled ? "✅ Yes" : "❌ No"}"
+  puts "Auth Mode: #{auth_mode}"
+  puts ""
+  puts "Promiscuous mode allows the server to export security"
+  puts "configuration for replication to other agents."
+  
+  exit 0
+end
+
+def set_promiscuous_mode(enabled : Bool)
+  config_file = "/etc/gentility.conf"
+  
+  update_config(config_file, "PROMISCUOUS_ENABLED", enabled.to_s)
+  
+  puts "🔐 Promiscuous Mode #{enabled ? "Enabled" : "Disabled"}"
+  puts "==============================#{enabled ? "=" : "=========="}"
+  puts "Promiscuous mode is now #{enabled ? "enabled" : "disabled"}."
+  puts ""
+  puts "Restart the agent to apply changes:"
+  puts "  sudo systemctl restart gentility-agent"
+  
+  exit 0
+rescue ex : Exception
+  puts "❌ Error: #{ex.message}"
+  exit 1
+end
+
+def set_promiscuous_auth_mode(mode : String)
+  unless ["password", "totp"].includes?(mode)
+    puts "❌ Error: Invalid auth mode. Use: password, totp"
+    exit 1
+  end
+  
+  config_file = "/etc/gentility.conf"
+  
+  update_config(config_file, "PROMISCUOUS_AUTH_MODE", mode)
+  
+  puts "🔐 Promiscuous Auth Mode Set"
+  puts "==========================="
+  puts "Promiscuous authentication mode set to: #{mode}"
+  puts ""
+  puts "This determines which credential is required for"
+  puts "promiscuous operations (uses the same password/TOTP as normal security)."
+  puts ""
+  puts "Restart the agent to apply changes:"
+  puts "  sudo systemctl restart gentility-agent"
+  
+  exit 0
+rescue ex : Exception
+  puts "❌ Error: #{ex.message}"
+  exit 1
+end
+
 def main
   # Check for setup command
   if ARGV.size >= 2 && ARGV[0] == "setup"
     setup_config(ARGV[1])
+  end
+
+  # Check for security setup commands
+  if ARGV.size >= 1
+    case ARGV[0]
+    when "security"
+      if ARGV.size >= 2
+        mode = ARGV[1]
+        value = ARGV.size >= 3 ? ARGV[2] : nil
+        setup_security(mode, value)
+      else
+        puts "Usage: #{PROGRAM_NAME} security <mode> [value]"
+        puts ""
+        puts "Security modes:"
+        puts "  totp [secret]     - Enable TOTP authentication (generates secret if not provided)"
+        puts "  password [pass]   - Enable password authentication (prompts if not provided)"  
+        puts "  none             - Disable security"
+        puts ""
+        puts "Examples:"
+        puts "  #{PROGRAM_NAME} security totp"
+        puts "  #{PROGRAM_NAME} security password mySecretPass123"
+        puts "  #{PROGRAM_NAME} security none"
+        exit 1
+      end
+    when "test-totp"
+      if ARGV.size >= 2
+        code = ARGV[1]
+        test_totp_validation(code)
+      else
+        puts "Usage: #{PROGRAM_NAME} test-totp <6-digit-code>"
+        puts ""
+        puts "Tests TOTP validation with the configured secret."
+        puts "Get a code from your authenticator app and test it."
+        exit 1
+      end
+    when "promiscuous"
+      if ARGV.size >= 2
+        action = ARGV[1]
+        case action
+        when "enable"
+          set_promiscuous_mode(true)
+        when "disable"
+          set_promiscuous_mode(false)
+        when "status"
+          show_promiscuous_status
+        when "auth"
+          if ARGV.size >= 3
+            mode = ARGV[2]
+            set_promiscuous_auth_mode(mode)
+          else
+            puts "Usage: #{PROGRAM_NAME} promiscuous auth <password|totp>"
+            exit 1
+          end
+        else
+          puts "Usage: #{PROGRAM_NAME} promiscuous <enable|disable|status|auth>"
+          puts ""
+          puts "Commands:"
+          puts "  enable       - Enable promiscuous mode"
+          puts "  disable      - Disable promiscuous mode"
+          puts "  status       - Show current promiscuous mode status"
+          puts "  auth <mode>  - Set promiscuous auth mode (password or totp)"
+          exit 1
+        end
+      else
+        puts "Usage: #{PROGRAM_NAME} promiscuous <enable|disable|status|auth>"
+        exit 1
+      end
+    end
   end
 
   access_key, server_url, nickname, environment, debug = parse_arguments
