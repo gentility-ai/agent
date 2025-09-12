@@ -28,10 +28,10 @@ Add the Gentility AI package repository to your system:
 ```bash
 # Add GPG key for package verification (modern method)
 sudo mkdir -p /etc/apt/keyrings
-curl -s https://gentility.sgp1.digitaloceanspaces.com/gentility-packages.gpg | sudo tee /etc/apt/keyrings/gentility-packages.asc > /dev/null
+curl -s https://packages.gentility.ai/gentility-packages.gpg | sudo tee /etc/apt/keyrings/gentility-packages.asc > /dev/null
 
 # Add repository with signed-by specification
-echo "deb [signed-by=/etc/apt/keyrings/gentility-packages.asc] https://gentility.sgp1.digitaloceanspaces.com/debian/ stable main" | sudo tee /etc/apt/sources.list.d/gentility.list
+echo "deb [signed-by=/etc/apt/keyrings/gentility-packages.asc] https://packages.gentility.ai/debian/ stable main" | sudo tee /etc/apt/sources.list.d/gentility.list
 
 # Update package list and install
 sudo apt update
@@ -44,10 +44,10 @@ Download and install the latest package directly:
 
 ```bash
 # Download the latest package
-wget https://gentility.sgp1.digitaloceanspaces.com/debian/pool/main/g/gentility-agent/gentility-agent_1.0.0_amd64.deb
+wget https://packages.gentility.ai/debian/pool/main/g/gentility-agent/gentility-agent_1.0.24_amd64.deb
 
 # Install the package
-sudo dpkg -i gentility-agent_1.0.0_amd64.deb
+sudo dpkg -i gentility-agent_1.0.24_amd64.deb
 
 # Install any missing dependencies
 sudo apt-get install -f
@@ -69,11 +69,11 @@ cd agent
 shards install
 
 # Build the binary
-crystal build src/agent.cr --release --static -o gentility-agent
+crystal build src/agent.cr --release --static -o gentility
 
 # Install manually (optional)
-sudo cp gentility-agent /usr/local/bin/gentility-agent
-sudo chmod +x /usr/local/bin/gentility-agent
+sudo cp gentility /usr/local/bin/gentility
+sudo chmod +x /usr/local/bin/gentility
 ```
 
 ## Quick Start
@@ -82,7 +82,7 @@ After installation, configure the agent with your access token using the setup c
 
 ```bash
 # Quick setup (recommended)
-sudo gentility-agent setup YOUR_TOKEN_HERE
+sudo gentility setup YOUR_TOKEN_HERE
 ```
 
 Or manually edit the configuration:
@@ -128,26 +128,54 @@ GENTILITY_TOKEN="gnt_1234567890abcdef"
 
 Get your access token from your Gentility AI dashboard.
 
+### Advanced Configuration Options
+
+The configuration file supports additional security and operational settings:
+
+```bash
+# /etc/gentility.conf
+
+# Required: Your access token
+GENTILITY_TOKEN="gnt_1234567890abcdef"
+
+# Optional: Server connection settings
+SERVER_URL="wss://api.gentility.ai"  # Default server
+NICKNAME="my-server"                 # Agent nickname (default: hostname)
+ENVIRONMENT="prod"                   # Environment: prod or staging
+DEBUG="false"                        # Enable debug logging
+
+# Security settings
+SECURITY_MODE="none"                 # Security mode: none, password, totp
+SECURITY_PASSWORD="mypassword"       # Password for password mode
+SECURITY_TOTP_SECRET="ABC123..."     # TOTP secret for TOTP mode
+SECURITY_ACTIVATION_TIMEOUT="1800"   # Security timeout in seconds (30 minutes)
+SECURITY_EXTENDABLE="true"           # Allow extending security sessions
+
+# Promiscuous mode (allows config sharing)
+PROMISCUOUS_ENABLED="true"           # Enable promiscuous mode
+PROMISCUOUS_AUTH_MODE="password"     # Auth mode for promiscuous operations
+```
+
 ## Service Management
 
 The agent runs as a systemd service and can be managed with standard commands:
 
 ```bash
 # Check service status
-sudo systemctl status gentility-agent
+sudo systemctl status gentility
 
 # Start/stop the service
-sudo systemctl start gentility-agent
-sudo systemctl stop gentility-agent
-sudo systemctl restart gentility-agent
+sudo systemctl start gentility
+sudo systemctl stop gentility
+sudo systemctl restart gentility
 
 # Enable/disable automatic startup
-sudo systemctl enable gentility-agent
-sudo systemctl disable gentility-agent
+sudo systemctl enable gentility
+sudo systemctl disable gentility
 
 # View logs
-sudo journalctl -u gentility-agent -f
-sudo journalctl -u gentility-agent --since="1 hour ago"
+sudo journalctl -u gentility -f
+sudo journalctl -u gentility --since="1 hour ago"
 ```
 
 ## Troubleshooting
@@ -182,8 +210,8 @@ sudo ufw status
 
 ### Log Locations
 
-- **Service logs**: `sudo journalctl -u gentility-agent`
-- **Application logs**: `/var/log/gentility-agent/` (if configured)
+- **Service logs**: `sudo journalctl -u gentility`
+- **Application logs**: `/var/log/gentility/` (if configured)
 
 ## Security
 
@@ -197,7 +225,7 @@ sudo ufw status
 
 For support, issues, or feature requests:
 
-- **GitHub Issues**: [Create an issue](https://github.com/gentility-ai/gentility-agent/issues)
+- **GitHub Issues**: [Create an issue](https://github.com/gentility-ai/agent/issues)
 - **Documentation**: [docs.gentility.ai](https://docs.gentility.ai)
 - **Email**: support@gentility.ai
 
@@ -206,6 +234,152 @@ For support, issues, or feature requests:
 MIT License - see [LICENSE](LICENSE) file for details.
 
 ---
+
+## Command Line Interface
+
+The `gentility` command provides several modes of operation:
+
+### Basic Usage
+
+```bash
+# Show help and available commands
+gentility
+gentility help
+
+# Start the agent daemon
+gentility run --token=YOUR_TOKEN_HERE
+gentility start --token=YOUR_TOKEN_HERE --debug
+```
+
+**Note**: The agent no longer starts automatically. You must explicitly use the `run` or `start` command.
+
+### Setup Commands
+
+```bash
+# Initial setup (creates /etc/gentility.conf)
+sudo gentility setup YOUR_TOKEN_HERE
+
+# After setup, start without specifying token
+gentility run
+```
+
+### Security Configuration
+
+The agent supports multiple security modes to protect sensitive operations:
+
+#### TOTP Authentication (Recommended)
+
+```bash
+# Enable TOTP with auto-generated secret
+sudo gentility security totp
+
+# Enable TOTP with custom secret
+sudo gentility security totp ABC123DEF456GHI789
+
+# Test your TOTP setup
+sudo gentility test-totp 123456
+```
+
+TOTP setup will display a QR code that you can scan with any authenticator app (Google Authenticator, Authy, 1Password, etc.). The QR code is generated as ASCII art directly in your terminal.
+
+#### Password Authentication
+
+```bash
+# Enable password security (prompts for password)
+sudo gentility security password
+
+# Enable password security with inline password
+sudo gentility security password mySecretPassword123
+```
+
+#### Disable Security
+
+```bash
+# Disable all security (not recommended for production)
+sudo gentility security none
+```
+
+### Promiscuous Mode
+
+Promiscuous mode allows the server to export and share security configuration across multiple agents:
+
+```bash
+# Enable promiscuous mode
+sudo gentility promiscuous enable
+
+# Disable promiscuous mode
+sudo gentility promiscuous disable
+
+# Check promiscuous mode status
+sudo gentility promiscuous status
+
+# Set promiscuous authentication mode
+sudo gentility promiscuous auth password  # or 'totp'
+```
+
+### Configuration Priority
+
+Configuration is loaded in this order (later sources override earlier ones):
+
+1. **Default values** (built into the application)
+2. **Configuration file** (`/etc/gentility.conf`)
+3. **Environment variables** (`GENTILITY_TOKEN`, `SERVER_URL`, etc.)
+4. **Command line arguments** (`--token=`, `--debug`)
+
+### Environment Variables
+
+All configuration options can be set via environment variables:
+
+```bash
+export GENTILITY_TOKEN="your-token-here"
+export SERVER_URL="wss://your-server.com"
+export NICKNAME="my-custom-name"
+export ENVIRONMENT="staging"
+export DEBUG="true"
+
+# Then start the agent
+gentility run
+```
+
+### Security Features
+
+- **Activation timeout**: Security sessions expire after 30 minutes by default
+- **Extendable sessions**: Each command execution extends the security session
+- **Hard timeout**: Sessions have an absolute maximum duration from first activation
+- **Multiple auth modes**: Support for both TOTP and password authentication
+- **Secure storage**: All security settings are stored with 600 permissions in `/etc/gentility.conf`
+- **QR code generation**: TOTP setup includes ASCII QR codes for easy authenticator app configuration
+
+### Complete Command Reference
+
+```bash
+# Main Commands
+gentility                           # Show help
+gentility run [options]             # Start the agent daemon
+gentility start [options]           # Alias for 'run'
+gentility help                      # Show help
+
+# Setup and Configuration
+gentility setup <token>             # Initial setup
+gentility security <mode> [value]   # Configure security
+gentility test-totp <code>          # Test TOTP validation
+gentility promiscuous <action>      # Configure promiscuous mode
+
+# Run Options
+--token=<token>                     # Access token
+--debug                             # Enable debug logging
+
+# Security Modes
+security totp [secret]              # TOTP authentication
+security password [password]        # Password authentication
+security none                       # No security
+
+# Promiscuous Actions
+promiscuous enable                  # Enable promiscuous mode
+promiscuous disable                 # Disable promiscuous mode
+promiscuous status                  # Show status
+promiscuous auth <mode>             # Set auth mode (password|totp)
+```
 
 ## For Developers
 

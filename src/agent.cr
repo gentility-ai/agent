@@ -30,7 +30,7 @@ require "crotp"
 require "qr-code"
 
 # ALWAYS UPDATE THIS VERSION IF YOU CHANGE THIS FILE
-VERSION = "1.0.23"
+VERSION = "1.0.24"
 
 # Global security state management
 module Security

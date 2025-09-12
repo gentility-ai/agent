@@ -3,7 +3,7 @@ Description=Gentility AI Agent Daemon
 After=network.target
 
 [Service]
-ExecStart=/usr/bin/gentility-agent
+ExecStart=/usr/bin/gentility run
 Restart=always
 RestartSec=5
 User=gentility

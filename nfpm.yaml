@@ -5,7 +5,7 @@
 name: "gentility-agent"
 arch: "amd64"
 platform: "linux"
-version: "1.0.21"
+version: "1.0.24"
 section: "net"
 priority: "optional"
 maintainer: "James Tippett - Gentility AI <james@gentility.ai>"
@@ -28,15 +28,15 @@ license: "MIT"
 contents:
   # Main binary
   - src: ./bin/gentility-agent
-    dst: /usr/bin/gentility-agent
+    dst: /usr/bin/gentility
     file_info:
       mode: 0755
       owner: root
       group: root
 
   # Systemd service file
-  - src: ./gentility-agent.service
-    dst: /etc/systemd/system/gentility-agent.service
+  - src: ./gentility.service
+    dst: /etc/systemd/system/gentility.service
     file_info:
       mode: 0644
       owner: root

@@ -158,11 +158,22 @@ setup-gpg:
 # Publish to local filesystem
 repo-publish-local repo_name="gentility-main" distribution="stable":
     @echo "Publishing repository '{{repo_name}}' locally..."
-    @if [ -f .env ]; then \
-        export $(cat .env | grep -v '^#' | xargs) && \
-        aptly -config=configs/aptly.conf publish repo -distribution={{distribution}} -gpg-key="${GPG_KEY_ID}" {{repo_name}} filesystem:local:debian; \
+    @if aptly -config=configs/aptly.conf publish list | grep -q "{{distribution}}"; then \
+        echo "Repository already published, updating..."; \
+        if [ -f .env ]; then \
+            export $(cat .env | grep -v '^#' | xargs) && \
+            aptly -config=configs/aptly.conf publish update -gpg-key="${GPG_KEY_ID}" {{distribution}} filesystem:local:debian; \
+        else \
+            aptly -config=configs/aptly.conf publish update -gpg-key=85C6BE5B453A071B {{distribution}} filesystem:local:debian; \
+        fi; \
     else \
-        aptly -config=configs/aptly.conf publish repo -distribution={{distribution}} -gpg-key=85C6BE5B453A071B {{repo_name}} filesystem:local:debian; \
+        echo "Publishing repository for first time..."; \
+        if [ -f .env ]; then \
+            export $(cat .env | grep -v '^#' | xargs) && \
+            aptly -config=configs/aptly.conf publish repo -distribution={{distribution}} -gpg-key="${GPG_KEY_ID}" {{repo_name}} filesystem:local:debian; \
+        else \
+            aptly -config=configs/aptly.conf publish repo -distribution={{distribution}} -gpg-key=85C6BE5B453A071B {{repo_name}} filesystem:local:debian; \
+        fi; \
     fi
     @echo "Repository published to ./public/"
 
@@ -234,11 +245,41 @@ repo-sync-remote remote_path:
     rsync -avz --delete ./public/ {{remote_path}}
     @echo "Repository synced to remote server"
 
-# Complete release workflow (build, package, and publish)
+# Complete release workflow (build, package, and deploy to nginx)
 release type="patch":
     #!/bin/bash
     set -e
     echo "🚀 Starting automated release workflow..."
+    just version-update {{type}}
+    echo ""
+    echo "📦 Building and packaging..."
+    just package-amd64
+    echo ""
+    echo "📤 Adding to repository and deploying..."
+    just repo-add-amd64
+    just deploy-packages
+    echo ""
+    
+    # Get current version after update
+    current_version=$(cat .version-lock.json | jq -r '.current_version')
+    
+    # Update README with latest version
+    echo "📝 Updating README with version ${current_version}..."
+    sed -i '' "s/gentility_[0-9]\+\.[0-9]\+\.[0-9]\+_amd64\.deb/gentility_${current_version}_amd64.deb/g" README.md
+    
+    echo "✅ Release v${current_version} completed successfully!"
+    echo ""
+    echo "📊 Release Summary:"
+    echo "  Version: ${current_version}"
+    echo "  Package: {{binary_name}}_${current_version}_amd64.deb"
+    echo "  Repository: https://packages.gentility.ai/debian/"
+    echo "  README updated with new version"
+
+# Legacy S3 release workflow
+release-s3 type="patch":
+    #!/bin/bash
+    set -e
+    echo "🚀 Starting automated S3 release workflow..."
     just version-update {{type}}
     echo ""
     echo "📦 Building and packaging..."
@@ -380,34 +421,22 @@ info:
     @echo "Available packages:"
     @ls -lh {{binary_name}}_{{version}}_*.deb 2>/dev/null || echo "  No packages built yet"
 
-# Deploy to self-hosted server
-deploy-nginx remote_path: (repo-publish-local)
-    @echo "Deploying to nginx server..."
-    rsync -avz --delete ./public/ {{remote_path}}
-    rsync -avz ./configs/index.html {{remote_path}}
-    rsync -avz ./gentility-packages.gpg {{remote_path}}
-    @echo "Deployment complete!"
-    @echo "Repository available at: {{remote_path}}"
+# Deploy packages with Ansible
+deploy-packages: (repo-publish-local)
+    @echo "Deploying packages to packages.gentility.ai..."
+    @which ansible-playbook >/dev/null || (echo "Please install Ansible first: pip install ansible"; exit 1)
+    ansible-playbook -i ansible/inventory/hosts.yml ansible/playbooks/deploy-packages.yml
 
 # Full S3 deployment workflow
 deploy-s3: (repo-update-s3)
     @echo "S3 deployment complete!"
     @echo "Repository available at your S3 endpoint"
 
-# Setup server (run this on your server)
-setup-server domain:
-    @echo "Setting up server for {{domain}}..."
-    sudo mkdir -p /var/www/{{domain}}
-    sudo chown $(whoami):www-data /var/www/{{domain}}
-    sudo chmod 755 /var/www/{{domain}}
-    @echo "Install nginx and certbot:"
-    @echo "  sudo apt install nginx certbot python3-certbot-nginx"
-    @echo "Configure nginx:"
-    @echo "  sudo cp configs/nginx-repo.conf /etc/nginx/sites-available/{{domain}}"
-    @echo "  sudo ln -s /etc/nginx/sites-available/{{domain}} /etc/nginx/sites-enabled/"
-    @echo "  sudo nginx -t && sudo systemctl reload nginx"
-    @echo "Get SSL certificate:"
-    @echo "  sudo certbot --nginx -d {{domain}}"
+# Setup server with Ansible
+setup-server:
+    @echo "Setting up packages.gentility.ai server with Ansible..."
+    @which ansible-playbook >/dev/null || (echo "Please install Ansible first: pip install ansible"; exit 1)
+    ansible-playbook -i ansible/inventory/hosts.yml ansible/playbooks/setup-server.yml
 
 # Test repository locally
 test-repo:
