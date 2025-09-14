@@ -2,7 +2,7 @@ class GentilityAgent < Formula
   desc "Secure WebSocket-based agent daemon for Gentility AI remote system administration"
   homepage "https://gentility.ai"
   url "https://github.com/gentility-ai/agent.git",
-      tag: "v1.0.25", revision: "HEAD"
+      tag: "v1.0.25"
   license "MIT"
 
   depends_on "crystal" => :build
