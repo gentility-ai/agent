@@ -1,0 +1,113 @@
+---
+- name: Deploy packages to repository
+  hosts: packages_servers
+  become: yes
+  vars:
+    local_repo_path: "{{ playbook_dir }}/../../public"
+    
+  tasks:
+    - name: Check if local repository exists
+      local_action:
+        module: stat
+        path: "{{ local_repo_path }}"
+      register: local_repo_stat
+      become: no
+
+    - name: Fail if local repository not found
+      fail:
+        msg: "Local repository not found at {{ local_repo_path }}. Run 'just repo-publish-local' first."
+      when: not local_repo_stat.stat.exists
+
+    - name: Create temporary directory for sync
+      tempfile:
+        state: directory
+        suffix: _gentility_deploy
+      register: temp_dir
+
+    - name: Sync repository files to temporary directory
+      synchronize:
+        src: "{{ local_repo_path }}/"
+        dest: "{{ temp_dir.path }}/"
+        delete: yes
+        rsync_opts:
+          - "--exclude=.DS_Store"
+          - "--exclude=*.tmp"
+          - "--checksum"
+      delegate_to: localhost
+      become: no
+
+    - name: Copy GPG key to temporary directory
+      copy:
+        src: "{{ playbook_dir }}/../../gentility-packages.gpg"
+        dest: "{{ temp_dir.path }}/gentility-packages.gpg"
+        mode: '0644'
+
+    - name: Set proper ownership for synced files
+      file:
+        path: "{{ temp_dir.path }}"
+        owner: "{{ packages_user }}"
+        group: www-data
+        mode: '0755'
+        recurse: yes
+
+    - name: Create backup of current repository
+      shell: |
+        if [ -d "{{ web_root }}/debian" ]; then
+          cp -r {{ web_root }} {{ web_root }}.backup.$(date +%Y%m%d_%H%M%S)
+          find {{ web_root }}.backup.* -maxdepth 0 -type d -mtime +7 -exec rm -rf {} \;
+        fi
+      changed_when: false
+
+    - name: Sync files to web root
+      shell: |
+        rsync -av --delete "{{ temp_dir.path }}/" "{{ web_root }}/"
+      register: sync_result
+      changed_when: "'sent' in sync_result.stdout"
+
+    - name: Set final permissions
+      file:
+        path: "{{ web_root }}"
+        owner: "{{ packages_user }}"
+        group: www-data
+        mode: '0755'
+        recurse: yes
+
+    - name: Test nginx configuration
+      command: nginx -t
+      register: nginx_test
+      changed_when: false
+
+    - name: Reload nginx
+      systemd:
+        name: nginx
+        state: reloaded
+
+    - name: Cleanup temporary directory
+      file:
+        path: "{{ temp_dir.path }}"
+        state: absent
+
+    - name: Verify repository is accessible
+      uri:
+        url: "https://{{ domain }}/debian/dists/stable/Release"
+        method: GET
+        status_code: 200
+      register: release_check
+      retries: 3
+      delay: 2
+
+    - name: Get repository statistics
+      shell: |
+        echo "Total packages: $(find {{ web_root }}/debian/pool -name '*.deb' | wc -l)"
+        echo "Repository size: $(du -sh {{ web_root }} | cut -f1)"
+        echo "Latest package: $(find {{ web_root }}/debian/pool -name '*.deb' -printf '%T@ %p\n' | sort -n | tail -1 | cut -d' ' -f2- | xargs basename)"
+      register: repo_stats
+      changed_when: false
+
+    - name: Show deployment summary
+      debug:
+        msg:
+          - "Deployment completed successfully!"
+          - "Repository URL: https://{{ domain }}"
+          - "{{ repo_stats.stdout_lines }}"
+          - "Release file accessible: {{ release_check.status == 200 }}"

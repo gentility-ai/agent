@@ -1,0 +1,165 @@
+---
+- name: Setup packages.gentility.ai repository server
+  hosts: packages_servers
+  become: yes
+  vars:
+    packages_to_install:
+      - nginx
+      - certbot
+      - python3-certbot-nginx
+      - curl
+      - wget
+      - ufw
+      - fail2ban
+      - unattended-upgrades
+    
+  tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      apt:
+        name: "{{ packages_to_install }}"
+        state: present
+        update_cache: yes
+
+    - name: Create packages user
+      user:
+        name: "{{ packages_user }}"
+        system: yes
+        home: /home/{{ packages_user }}
+        shell: /bin/bash
+        create_home: yes
+
+    - name: Create web root directory
+      file:
+        path: "{{ web_root }}"
+        state: directory
+        owner: "{{ packages_user }}"
+        group: www-data
+        mode: '0755'
+
+    - name: Create nginx site configuration
+      template:
+        src: ../templates/nginx-site.conf.j2
+        dest: /etc/nginx/sites-available/{{ domain }}
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart nginx
+
+    - name: Enable nginx site
+      file:
+        src: /etc/nginx/sites-available/{{ domain }}
+        dest: /etc/nginx/sites-enabled/{{ domain }}
+        state: link
+      notify: restart nginx
+
+    - name: Remove default nginx site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: restart nginx
+
+    - name: Configure UFW firewall
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+      loop:
+        - 22
+        - 80
+        - 443
+
+    - name: Enable UFW
+      ufw:
+        state: enabled
+        policy: deny
+
+    - name: Configure fail2ban
+      copy:
+        content: |
+          [DEFAULT]
+          bantime = 3600
+          findtime = 600
+          maxretry = 5
+
+          [sshd]
+          enabled = true
+        dest: /etc/fail2ban/jail.local
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart fail2ban
+
+    - name: Configure automatic security updates
+      copy:
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Download-Upgradeable-Packages "1";
+          APT::Periodic::AutocleanInterval "7";
+          APT::Periodic::Unattended-Upgrade "1";
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Start and enable services
+      systemd:
+        name: "{{ item }}"
+        state: started
+        enabled: yes
+      loop:
+        - nginx
+        - fail2ban
+        - ufw
+
+    - name: Test nginx configuration
+      command: nginx -t
+      register: nginx_test
+      changed_when: false
+
+    - name: Get SSL certificate with certbot
+      command: >
+        certbot --nginx -d {{ domain }}
+        --non-interactive --agree-tos --email {{ admin_email }}
+        --redirect --hsts --staple-ocsp
+      register: certbot_result
+      changed_when: "'Successfully received certificate' in certbot_result.stdout"
+      failed_when: certbot_result.rc != 0 and 'Certificate not yet due for renewal' not in certbot_result.stdout
+
+    - name: Setup certbot auto-renewal
+      cron:
+        name: "Certbot auto-renewal"
+        minute: "0"
+        hour: "12"
+        job: "/usr/bin/certbot renew --quiet"
+
+    - name: Create index page for repository
+      template:
+        src: ../templates/index.html.j2
+        dest: "{{ web_root }}/index.html"
+        owner: "{{ packages_user }}"
+        group: www-data
+        mode: '0644'
+
+    - name: Show server status
+      debug:
+        msg:
+          - "Server setup complete!"
+          - "Domain: {{ domain }}"
+          - "Web root: {{ web_root }}"
+          - "SSL certificate: {{ 'Installed' if certbot_result.changed else 'Already present' }}"
+          - "Repository URL: https://{{ domain }}"
+
+  handlers:
+    - name: restart nginx
+      systemd:
+        name: nginx
+        state: restarted
+
+    - name: restart fail2ban
+      systemd:
+        name: fail2ban
+        state: restarted
