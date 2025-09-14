@@ -5,9 +5,9 @@
 # Get this from your Gentility AI dashboard
 GENTILITY_TOKEN=your_token_here
 
-# OPTIONAL: Server URL (default: wss://api.gentility.ai)
+# OPTIONAL: Server URL (default: wss://core.gentility.ai)
 # Use wss:// for production, ws:// for development
-#SERVER_URL=wss://api.gentility.ai
+#SERVER_URL=wss://core.gentility.ai
 
 # OPTIONAL: Agent nickname (default: hostname)
 # This helps identify your agent in the dashboard

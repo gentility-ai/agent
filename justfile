@@ -11,7 +11,7 @@ lockfile_version := `cat .version-lock.json 2>/dev/null | jq -r '.current_versio
 lockfile_hash := `cat .version-lock.json 2>/dev/null | jq -r '.source_hash // ""' 2>/dev/null || echo ""`
 
 version := lockfile_version
-deb_file := binary_name + "_" + version + "_" + arch + ".deb"
+deb_file := "packages/" + binary_name + "_" + version + "_" + arch + ".deb"
 
 # Show available commands
 default:
@@ -48,7 +48,7 @@ build-remote-amd64:
     @if [ -f .env ]; then \
         export $(cat .env | grep -v '^#' | xargs) && \
         echo "Syncing source to ${CORE7_USER}@${CORE7_IP}..." && \
-        rsync -avz --exclude 'bin/' --exclude '*.deb' --exclude 'aptly-repo/' --exclude 'public/' --exclude '.git/' ./ ${CORE7_USER}@${CORE7_IP}:/tmp/gentility-build/ && \
+        rsync -avz --exclude 'bin/' --exclude 'packages/' --exclude 'aptly-repo/' --exclude 'public/' --exclude '.git/' ./ ${CORE7_USER}@${CORE7_IP}:/tmp/gentility-build/ && \
         echo "Building on core7..." && \
         ssh ${CORE7_USER}@${CORE7_IP} "cd /tmp/gentility-build && mkdir -p bin && shards install && crystal build src/agent.cr --release --static --no-debug -o bin/{{binary_name}}-{{version}}-linux-amd64" && \
         echo "Fetching AMD64 binary from core7..." && \
@@ -70,15 +70,16 @@ build-local-arm64: install-deps
 # Create DEB package for AMD64 
 package-amd64: build-remote-amd64
     @echo "Creating DEB package for AMD64..."
-    @if [ -f "{{binary_name}}_{{version}}_amd64.deb" ]; then \
-        echo "⚠️  Package {{binary_name}}_{{version}}_amd64.deb already exists!"; \
+    @mkdir -p packages
+    @if [ -f "packages/{{binary_name}}_{{version}}_amd64.deb" ]; then \
+        echo "⚠️  Package packages/{{binary_name}}_{{version}}_amd64.deb already exists!"; \
         echo "Removing existing package to rebuild with latest changes..."; \
-        rm -f {{binary_name}}_{{version}}_amd64.deb; \
+        rm -f packages/{{binary_name}}_{{version}}_amd64.deb; \
     fi
     @cp {{bin_dir}}/{{binary_name}}-{{version}}-linux-amd64 {{bin_dir}}/{{binary_name}}
-    nfpm pkg --packager deb --config nfpm.yaml --target {{binary_name}}_{{version}}_amd64.deb
+    nfpm pkg --packager deb --config nfpm.yaml --target packages/{{binary_name}}_{{version}}_amd64.deb
     @rm {{bin_dir}}/{{binary_name}}
-    @echo "✅ DEB package created: {{binary_name}}_{{version}}_amd64.deb"
+    @echo "✅ DEB package created: packages/{{binary_name}}_{{version}}_amd64.deb"
 
 # Create DEB package for ARM64 (requires Linux ARM64 build)
 package-arm64:
@@ -102,13 +103,13 @@ repo-add-package package_file repo_name="gentility-main":
 # Add AMD64 package to aptly repository
 repo-add-amd64 repo_name="gentility-main": package-amd64
     @echo "Adding AMD64 package to aptly repository '{{repo_name}}'..."
-    aptly -config=configs/aptly.conf repo add {{repo_name}} {{binary_name}}_{{version}}_amd64.deb
+    aptly -config=configs/aptly.conf repo add {{repo_name}} packages/{{binary_name}}_{{version}}_amd64.deb
     @echo "AMD64 package added to repository"
 
 # Add all available packages to repository
 repo-add-all repo_name="gentility-main": package-all
     @echo "Adding all packages to repository..."
-    @for pkg in {{binary_name}}_{{version}}_*.deb; do \
+    @for pkg in packages/{{binary_name}}_{{version}}_*.deb; do \
         if [ -f "$$pkg" ]; then \
             echo "Adding $$pkg..." && \
             aptly -config=configs/aptly.conf repo add {{repo_name}} $$pkg; \
@@ -204,7 +205,7 @@ repo-update-s3 repo_name="gentility-main" distribution="stable":
     set -e
     echo "Updating DO Spaces repository with new package..."
     current_version=$(cat .version-lock.json | jq -r '.current_version')
-    deb_file="{{binary_name}}_${current_version}_amd64.deb"
+    deb_file="packages/{{binary_name}}_${current_version}_amd64.deb"
     
     if [ ! -f "$deb_file" ]; then
         echo "Error: Package file $deb_file not found!"
@@ -306,7 +307,7 @@ release-legacy repo_name="gentility-main" distribution="stable": package (repo-u
 clean:
     @echo "Cleaning build artifacts..."
     rm -rf {{bin_dir}}
-    rm -f *.deb
+    rm -rf packages
     rm -f *.rpm
 
 # Run tests (if any exist)
@@ -419,7 +420,7 @@ info:
     @ls -lh {{bin_dir}}/{{binary_name}}-* 2>/dev/null || echo "  No binaries built yet"
     @echo ""
     @echo "Available packages:"
-    @ls -lh {{binary_name}}_{{version}}_*.deb 2>/dev/null || echo "  No packages built yet"
+    @ls -lh packages/{{binary_name}}_{{version}}_*.deb 2>/dev/null || echo "  No packages built yet"
 
 # Deploy packages with Ansible
 deploy-packages: (repo-publish-local)

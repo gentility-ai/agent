@@ -113,6 +113,28 @@ sudo systemctl status gentility-agent
 sudo journalctl -u gentility-agent -f
 ```
 
+## Uninstallation
+
+To completely remove the agent from your system:
+
+```bash
+# Stop and disable the service
+sudo systemctl stop gentility
+sudo systemctl disable gentility
+
+# Remove the package
+sudo apt remove gentility-agent
+
+# Optional: Remove configuration and logs
+sudo rm -rf /etc/gentility.conf
+sudo rm -rf /var/log/gentility-agent
+sudo rm -rf /var/lib/gentility-agent
+
+# Optional: Remove repository from sources
+sudo rm /etc/apt/sources.list.d/gentility.list
+sudo rm /etc/apt/keyrings/gentility-packages.asc
+```
+
 ## Configuration
 
 The agent is configured through `/etc/gentility.conf`.
@@ -139,7 +161,7 @@ The configuration file supports additional security and operational settings:
 GENTILITY_TOKEN="gnt_1234567890abcdef"
 
 # Optional: Server connection settings
-SERVER_URL="wss://api.gentility.ai"  # Default server
+SERVER_URL="wss://core.gentility.ai"  # Default server
 NICKNAME="my-server"                 # Agent nickname (default: hostname)
 ENVIRONMENT="prod"                   # Environment: prod or staging
 DEBUG="false"                        # Enable debug logging

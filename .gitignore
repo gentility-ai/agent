@@ -24,11 +24,10 @@ credentials*
 !gentility-agent.conf.example
 
 # Build artifacts
-*.deb
+/packages/
 *.rpm
 *.tar.gz
 *.zip
-gentility-agent_*_*.deb
 gentility-agent-*-linux-*
 gentility-agent-*-darwin-*
 
