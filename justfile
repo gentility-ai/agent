@@ -290,6 +290,19 @@ release type="patch":
     echo "🚀 Starting automated release workflow..."
     just version-update {{type}}
     echo ""
+
+    # Get current version after update
+    current_version=$(cat .version-lock.json | jq -r '.current_version')
+
+    # Commit version changes
+    echo "📝 Committing version changes..."
+    git add -A
+    git commit -m "Bump version to v${current_version}" || echo "No changes to commit"
+
+    # Create and push tag
+    echo "🏷️  Creating git tag v${current_version}..."
+    git tag "v${current_version}"
+
     echo "📦 Building and packaging..."
     just package-amd64
     echo ""
@@ -297,21 +310,38 @@ release type="patch":
     just repo-add-amd64
     just deploy-packages
     echo ""
-    
-    # Get current version after update
-    current_version=$(cat .version-lock.json | jq -r '.current_version')
-    
+
     # Update README with latest version
     echo "📝 Updating README with version ${current_version}..."
-    sed -i '' "s/gentility_[0-9]\+\.[0-9]\+\.[0-9]\+_amd64\.deb/gentility_${current_version}_amd64.deb/g" README.md
-    
+    sed -i '' "s/gentility-agent_[0-9]\+\.[0-9]\+\.[0-9]\+_amd64\.deb/gentility-agent_${current_version}_amd64.deb/g" README.md
+
+    # Commit README update if changed
+    git add README.md
+    git commit -m "Update README with version ${current_version}" || echo "README already up to date"
+
+    # Push everything
+    echo "🚀 Pushing to GitHub..."
+    git push origin main --tags
+
+    # Push homebrew-agent tap update if it exists
+    if [ -d "homebrew-agent" ]; then
+        echo "📦 Updating Homebrew tap..."
+        cd homebrew-agent
+        git add Formula/gentility-agent.rb
+        git commit -m "Update to version ${current_version}" || echo "No changes in tap"
+        git push origin main || echo "Failed to push tap - may need to set up remote"
+        cd ..
+    fi
+
     echo "✅ Release v${current_version} completed successfully!"
     echo ""
     echo "📊 Release Summary:"
     echo "  Version: ${current_version}"
     echo "  Package: {{binary_name}}_${current_version}_amd64.deb"
     echo "  Repository: https://packages.gentility.ai/debian/"
+    echo "  Git tag: v${current_version}"
     echo "  README updated with new version"
+    echo "  Homebrew formula updated"
 
 # Legacy S3 release workflow
 release-s3 type="patch":
@@ -381,19 +411,19 @@ version-check:
 version-update type="patch":
     #!/bin/bash
     set -e
-    
+
     current_hash_check=$(grep -v 'VERSION = ' src/agent.cr | shasum -a 256 | cut -d' ' -f1)
     lockfile_hash_check=$(cat .version-lock.json 2>/dev/null | jq -r '.source_hash // ""' 2>/dev/null || echo "")
-    
+
     if [ "$current_hash_check" = "$lockfile_hash_check" ] && [ ! -z "$lockfile_hash_check" ]; then
         echo "✅ Source hasn't changed, no version update needed"
         exit 0
     fi
-    
+
     echo "🔄 Source has changed, incrementing version..."
     current_version={{version}}
     IFS='.' read -r major minor patch <<< "$current_version"
-    
+
     if [ "{{type}}" = "major" ]; then
         new_version="$((major + 1)).0.0"
     elif [ "{{type}}" = "minor" ]; then
@@ -401,21 +431,41 @@ version-update type="patch":
     else
         new_version="$major.$minor.$((patch + 1))"
     fi
-    
+
     timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     echo "  📝 Updating version from $current_version to $new_version"
-    
+
+    # Update version in source files
     sed -i '' "s/VERSION = \"$current_version\"/VERSION = \"$new_version\"/" src/agent.cr
     sed -i '' "s/version: \"$current_version\"/version: \"$new_version\"/" nfpm.yaml nfpm-arm64.yaml 2>/dev/null || true
-    
+
+    # Update Homebrew formula
+    if [ -f "Formula/gentility-agent.rb" ]; then
+        sed -i '' "s/tag: \"v$current_version\"/tag: \"v$new_version\"/" Formula/gentility-agent.rb
+        echo "  📦 Updated Homebrew formula"
+    fi
+
+    # Update homebrew-agent tap if it exists
+    if [ -f "homebrew-agent/Formula/gentility-agent.rb" ]; then
+        sed -i '' "s/tag: \"v$current_version\"/tag: \"v$new_version\"/" homebrew-agent/Formula/gentility-agent.rb
+        echo "  📦 Updated Homebrew tap formula"
+    fi
+
+    # Update version lock
     old_entry=$(cat .version-lock.json 2>/dev/null | jq -c '{version: .current_version, hash: .source_hash, timestamp: .last_updated}' 2>/dev/null || echo '{}')
     new_hash=$(grep -v 'VERSION = ' src/agent.cr | shasum -a 256 | cut -d' ' -f1)
-    
+
     cat .version-lock.json 2>/dev/null | jq --arg version "$new_version" --arg hash "$new_hash" --arg timestamp "$timestamp" --argjson old "$old_entry" \
         '.current_version = $version | .source_hash = $hash | .last_updated = $timestamp | .history = ((.history // []) + [$old])[-10:]' > .version-lock.json.tmp && mv .version-lock.json.tmp .version-lock.json || \
     echo "{\"current_version\": \"$new_version\", \"source_hash\": \"$new_hash\", \"last_updated\": \"$timestamp\", \"history\": []}" | jq . > .version-lock.json
-    
+
     echo "  ✅ Version updated to $new_version and lockfile saved"
+    echo ""
+    echo "  🏷️  To create git tag and push:"
+    echo "      git add -A"
+    echo "      git commit -m \"Bump version to v$new_version\""
+    echo "      git tag v$new_version"
+    echo "      git push origin main --tags"
 
 # Force version bump (manual override)
 version-bump type="patch":
