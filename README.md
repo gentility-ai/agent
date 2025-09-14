@@ -16,8 +16,10 @@ A secure, lightweight WebSocket-based agent daemon that connects your privileged
 
 - **Linux AMD64** (x86_64) - Primary support with static binaries
 - **Linux ARM64** - Coming soon
+- **macOS** (Intel and Apple Silicon) - Homebrew support
 
 Tested on Ubuntu 20.04+, Debian 11+, CentOS 8+, and other modern Linux distributions.
+macOS 10.15+ supported via Homebrew.
 
 ## Installation
 

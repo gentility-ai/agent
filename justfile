@@ -60,12 +60,49 @@ build-remote-amd64:
         exit 1; \
     fi
 
+# Build for macOS (detects current architecture)
+build-macos: install-deps
+    @echo "Building {{binary_name}} v{{version}} for macOS..."
+    @mkdir -p {{bin_dir}}
+    @arch=$(uname -m); \
+    if [ "$$arch" = "arm64" ]; then \
+        echo "Building for Apple Silicon (ARM64)..."; \
+        crystal build src/agent.cr --release --no-debug -o {{bin_dir}}/{{binary_name}}-{{version}}-darwin-arm64; \
+        echo "macOS ARM64 binary built: {{bin_dir}}/{{binary_name}}-{{version}}-darwin-arm64"; \
+    else \
+        echo "Building for Intel (x86_64)..."; \
+        crystal build src/agent.cr --release --no-debug -o {{bin_dir}}/{{binary_name}}-{{version}}-darwin-x86_64; \
+        echo "macOS x86_64 binary built: {{bin_dir}}/{{binary_name}}-{{version}}-darwin-x86_64"; \
+    fi
+
 # Build locally for ARM64 (Mac M1) - Note: This will be Darwin ARM64, not Linux ARM64
 build-local-arm64: install-deps
     @echo "Building {{binary_name}} v{{version}} locally for Darwin ARM64..."
     @mkdir -p {{bin_dir}}
     crystal build src/agent.cr --release --no-debug -o {{bin_dir}}/{{binary_name}}-{{version}}-darwin-arm64
     @echo "Darwin ARM64 binary built: {{bin_dir}}/{{binary_name}}-{{version}}-darwin-arm64"
+
+# Build locally for Intel macOS
+build-local-x86_64: install-deps
+    @echo "Building {{binary_name}} v{{version}} locally for Darwin x86_64..."
+    @mkdir -p {{bin_dir}}
+    crystal build src/agent.cr --release --no-debug -o {{bin_dir}}/{{binary_name}}-{{version}}-darwin-x86_64
+    @echo "Darwin x86_64 binary built: {{bin_dir}}/{{binary_name}}-{{version}}-darwin-x86_64"
+
+# Create macOS release archive (for Homebrew and GitHub releases)
+package-macos: build-macos
+    @echo "Creating macOS release archive..."
+    @mkdir -p packages
+    @arch=$(uname -m); \
+    if [ "$$arch" = "arm64" ]; then \
+        binary_name="{{binary_name}}-{{version}}-darwin-arm64"; \
+        archive_name="{{binary_name}}-{{version}}-darwin-arm64.tar.gz"; \
+    else \
+        binary_name="{{binary_name}}-{{version}}-darwin-x86_64"; \
+        archive_name="{{binary_name}}-{{version}}-darwin-x86_64.tar.gz"; \
+    fi; \
+    tar -czf packages/$$archive_name -C {{bin_dir}} $$binary_name gentility.conf.example; \
+    echo "✅ macOS archive created: packages/$$archive_name"
 
 # Create DEB package for AMD64 
 package-amd64: build-remote-amd64

@@ -203,7 +203,7 @@ class GentilityAgent
   end
 
   private def load_security_config
-    config_file = "/etc/gentility.conf"
+    config_file = get_config_path
     config = load_config_from_file(config_file) || {} of String => String
 
     mode = config["SECURITY_MODE"]? || "none"
@@ -230,7 +230,7 @@ class GentilityAgent
   end
 
   private def save_security_config(mode : String, password : String?, totp_secret : String?, timeout : Int32, extendable : Bool)
-    config_file = "/etc/gentility.conf"
+    config_file = get_config_path
 
     # Read existing config
     existing_config = [] of String
@@ -928,7 +928,7 @@ def parse_arguments
   debug = false
 
   # 2. Load configuration from file if it exists
-  config_file = "/etc/gentility.conf"
+  config_file = get_config_path
   config = load_config_from_file(config_file) || {} of String => String
 
   # Apply config file settings
@@ -1021,8 +1021,28 @@ def parse_arguments
   {access_key, server_url, nickname, environment, debug}
 end
 
+def get_config_path : String
+  # Check for environment variable first (used by Homebrew service)
+  if config_path = ENV["GENTILITY_CONFIG"]?
+    return config_path
+  end
+
+  # Platform-specific defaults
+  {% if flag?(:darwin) %}
+    # macOS - check for Homebrew installation
+    if File.exists?("/opt/homebrew/etc")
+      return "/opt/homebrew/etc/gentility.conf"
+    elsif File.exists?("/usr/local/etc")
+      return "/usr/local/etc/gentility.conf"
+    end
+  {% end %}
+
+  # Default to /etc for Linux and other systems
+  "/etc/gentility.conf"
+end
+
 def setup_config(token : String)
-  config_file = "/etc/gentility.conf"
+  config_file = get_config_path
 
   # Check if config file already exists
   if File.exists?(config_file)
@@ -1154,7 +1174,7 @@ def generate_qr_ascii(text : String) : String
 end
 
 def setup_security(mode : String, value : String? = nil)
-  config_file = "/etc/gentility.conf"
+  config_file = get_config_path
 
   case mode
   when "totp"
@@ -1270,7 +1290,7 @@ def remove_config(config_file : String, keys : Array(String))
 end
 
 def test_totp_validation(code : String)
-  config_file = "/etc/gentility.conf"
+  config_file = get_config_path
   config = load_config_from_file(config_file) || {} of String => String
 
   totp_secret = config["SECURITY_TOTP_SECRET"]?
@@ -1305,7 +1325,7 @@ def test_totp_validation(code : String)
 end
 
 def show_promiscuous_status
-  config_file = "/etc/gentility.conf"
+  config_file = get_config_path
   config = load_config_from_file(config_file) || {} of String => String
 
   enabled = config["PROMISCUOUS_ENABLED"]? != "false"
@@ -1323,7 +1343,7 @@ def show_promiscuous_status
 end
 
 def set_promiscuous_mode(enabled : Bool)
-  config_file = "/etc/gentility.conf"
+  config_file = get_config_path
 
   update_config(config_file, "PROMISCUOUS_ENABLED", enabled.to_s)
 
@@ -1346,7 +1366,7 @@ def set_promiscuous_auth_mode(mode : String)
     exit 1
   end
 
-  config_file = "/etc/gentility.conf"
+  config_file = get_config_path
 
   update_config(config_file, "PROMISCUOUS_AUTH_MODE", mode)
 
@@ -1371,7 +1391,7 @@ def show_status
   puts "==================#{("=" * VERSION.size)}"
   puts ""
 
-  config_file = "/etc/gentility.conf"
+  config_file = get_config_path
   config = load_config_from_file(config_file) || {} of String => String
 
   # Check if configured
@@ -1491,7 +1511,7 @@ def show_help
   puts "    gentility start --token=gnt_1234567890abcdef --debug"
   puts ""
   puts "CONFIGURATION:"
-  puts "    Config file: /etc/gentility.conf"
+  puts "    Config file: #{get_config_path}"
   puts "    Service: sudo systemctl start gentility"
   puts ""
 end
