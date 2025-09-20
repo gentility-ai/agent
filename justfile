@@ -360,7 +360,7 @@ release type="patch":
     echo ""
     echo "📝 Committing version changes..."
     # Stage only release-related files
-    git add VERSION nfpm.yaml nfpm-arm64.yaml justfile Formula/gentility-agent.rb README.md 2>/dev/null || true
+    git add VERSION nfpm.yaml nfpm-arm64.yaml justfile Formula/gentility-agent.rb homebrew-agent/ README.md 2>/dev/null || true
     git commit -m "Release v${current_version}" || echo "No changes to commit"
 
     # Check if tag already exists
