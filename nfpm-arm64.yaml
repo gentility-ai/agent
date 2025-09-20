@@ -1,0 +1,73 @@
+# Gentility AI Agent Daemon - nfpm configuration for ARM64
+# yaml-language-server: $schema=https://nfpm.goreleaser.com/static/schema.json
+# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+
+name: "gentility-agent"
+arch: "arm64"
+platform: "linux"
+version: "1.1.1"
+section: "net"
+priority: "optional"
+maintainer: "James Tippett - Gentility AI <james@gentility.ai>"
+description: |
+  Gentility AI Agent Daemon
+  A WebSocket-based agent that connects to Gentility AI servers to provide
+  remote system administration and automation capabilities.
+
+  Features:
+  - Real-time WebSocket communication with Gentility AI servers
+  - System information collection and reporting
+  - Remote command execution capabilities
+  - Database query execution (PostgreSQL and MySQL)
+  - File read/write operations
+  - Capability checking and validation
+vendor: "Gentility AI"
+homepage: "https://gentility.ai"
+license: "MIT"
+
+contents:
+  # Main binary
+  - src: ./bin/gentility-agent
+    dst: /usr/bin/gentility-agent
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  # Systemd service file
+  - src: ./gentility-agent.service
+    dst: /etc/systemd/system/gentility-agent.service
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  # Configuration file template
+  - src: ./gentility.conf.example
+    dst: /etc/gentility.conf.example
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  # Log directory
+  - dst: /var/log/gentility-agent
+    type: dir
+    file_info:
+      mode: 0755
+      owner: gentility
+      group: gentility
+
+  # Data directory
+  - dst: /var/lib/gentility-agent
+    type: dir
+    file_info:
+      mode: 0755
+      owner: gentility
+      group: gentility
+
+scripts:
+  preinstall: ./scripts/preinstall.sh
+  postinstall: ./scripts/postinstall.sh
+  preremove: ./scripts/preremove.sh
+  postremove: ./scripts/postremove.sh

@@ -1,0 +1,320 @@
+{
+  "$schema": "https://tools.ietf.org/draft/handrews-json-type-definition-04",
+  "$id": "https://gentility.ai/schemas/agent-protocol/v1",
+  "metadata": {
+    "title": "Gentility AI Agent WebSocket Protocol",
+    "description": "JSON Type Definition schema for WebSocket messages between Gentility AI server and agents",
+    "version": "1.0.25"
+  },
+  "definitions": {
+    "MessageBase": {
+      "properties": {
+        "type": { "type": "string" }
+      },
+      "required": ["type"]
+    },
+    
+    "WelcomeMessage": {
+      "properties": {
+        "type": { "enum": ["welcome"] },
+        "server_target_id": { "type": "string" }
+      },
+      "required": ["type"]
+    },
+    
+    "PingMessage": {
+      "properties": {
+        "type": { "enum": ["ping"] },
+        "timestamp": { "type": "float64" }
+      },
+      "required": ["type"]
+    },
+    
+    "PongMessage": {
+      "properties": {
+        "type": { "enum": ["pong"] },
+        "timestamp": { "type": "float64" },
+        "security_enabled": { "type": "boolean" },
+        "security_mode": { "type": "string" },
+        "active": { "type": "boolean" },
+        "time_remaining": { "type": "int32" },
+        "extendable": { "type": "boolean" }
+      },
+      "required": ["type", "timestamp", "security_enabled", "security_mode", "active", "time_remaining", "extendable"]
+    },
+    
+    "CommandMessage": {
+      "properties": {
+        "type": { "enum": ["command"] },
+        "request_id": { "type": "string" },
+        "command": { "type": "string" },
+        "params": {}
+      },
+      "required": ["type", "request_id", "command"]
+    },
+    
+    "ResponseMessage": {
+      "properties": {
+        "type": { "enum": ["response"] },
+        "request_id": { "type": "string" },
+        "result": {}
+      },
+      "required": ["type", "request_id", "result"]
+    },
+    
+    "ErrorMessage": {
+      "properties": {
+        "type": { "enum": ["error"] },
+        "request_id": { "type": "string" },
+        "error": { "type": "string" }
+      },
+      "required": ["type", "request_id", "error"]
+    },
+    
+    "StatusMessage": {
+      "properties": {
+        "type": { "enum": ["status"] },
+        "status": {
+          "properties": {
+            "agent_version": { "type": "string" },
+            "hostname": { "type": "string" },
+            "local_ip": { "type": "string" },
+            "environment": { "type": "string" },
+            "nickname": { "type": "string" },
+            "uptime": { "type": "float64" },
+            "timestamp": { "type": "float64" },
+            "security_enabled": { "type": "boolean" },
+            "security_mode": { "type": "string" },
+            "active": { "type": "boolean" },
+            "time_remaining": { "type": "int32" },
+            "extendable": { "type": "boolean" }
+          },
+          "required": ["agent_version", "hostname", "local_ip", "environment", "nickname", "uptime", "timestamp", "security_enabled", "security_mode", "active", "time_remaining", "extendable"]
+        }
+      },
+      "required": ["type", "status"]
+    },
+    
+    "CommandParams": {
+      "discriminator": "command_type",
+      "mapping": {
+        "ping": {
+          "properties": {
+            "command_type": { "enum": ["ping"] }
+          }
+        },
+        "system_info": {
+          "properties": {
+            "command_type": { "enum": ["system_info"] }
+          }
+        },
+        "check_capabilities": {
+          "properties": {
+            "command_type": { "enum": ["check_capabilities"] },
+            "capabilities": {
+              "elements": { "type": "string" }
+            }
+          },
+          "required": ["capabilities"]
+        },
+        "execute": {
+          "properties": {
+            "command_type": { "enum": ["execute"] },
+            "command": { "type": "string" }
+          },
+          "required": ["command"]
+        },
+        "file_read": {
+          "properties": {
+            "command_type": { "enum": ["file_read"] },
+            "path": { "type": "string" }
+          },
+          "required": ["path"]
+        },
+        "file_write": {
+          "properties": {
+            "command_type": { "enum": ["file_write"] },
+            "path": { "type": "string" },
+            "content": { "type": "string" }
+          },
+          "required": ["path", "content"]
+        },
+        "psql_query": {
+          "properties": {
+            "command_type": { "enum": ["psql_query"] },
+            "host": { "type": "string" },
+            "port": { "type": "int32" },
+            "dbname": { "type": "string" },
+            "query": { "type": "string" },
+            "user": { "type": "string" },
+            "username": { "type": "string" },
+            "password": { "type": "string" }
+          },
+          "required": ["host", "port", "dbname", "query"]
+        },
+        "mysql_query": {
+          "properties": {
+            "command_type": { "enum": ["mysql_query"] },
+            "host": { "type": "string" },
+            "port": { "type": "int32" },
+            "dbname": { "type": "string" },
+            "query": { "type": "string" }
+          },
+          "required": ["host", "port", "dbname", "query"]
+        },
+        "activate": {
+          "properties": {
+            "command_type": { "enum": ["activate"] },
+            "credential": { "type": "string" }
+          },
+          "required": ["credential"]
+        },
+        "lock": {
+          "properties": {
+            "command_type": { "enum": ["lock"] }
+          }
+        },
+        "export_security": {
+          "properties": {
+            "command_type": { "enum": ["export_security"] },
+            "credential": { "type": "string" }
+          },
+          "required": ["credential"]
+        },
+        "configure_security": {
+          "properties": {
+            "command_type": { "enum": ["configure_security"] },
+            "mode": { "enum": ["none", "password", "totp"] },
+            "password": { "type": "string" },
+            "totp_secret": { "type": "string" },
+            "timeout": { "type": "int32" },
+            "extendable": { "type": "boolean" }
+          },
+          "required": ["mode"]
+        }
+      }
+    },
+    
+    "CommandResults": {
+      "discriminator": "result_type",
+      "mapping": {
+        "pong": {
+          "properties": {
+            "result_type": { "enum": ["pong"] },
+            "status": { "type": "string" },
+            "timestamp": { "type": "float64" }
+          },
+          "required": ["status", "timestamp"]
+        },
+        "system_info": {
+          "properties": {
+            "result_type": { "enum": ["system_info"] },
+            "hostname": { "type": "string" },
+            "os": { "type": "string" },
+            "architecture": { "type": "string" },
+            "uptime": { "type": "string" },
+            "load_avg": { "type": "string" },
+            "disk_usage": { "type": "string" },
+            "memory": { "type": "string" }
+          }
+        },
+        "capabilities": {
+          "properties": {
+            "result_type": { "enum": ["capabilities"] },
+            "available_capabilities": {
+              "elements": { "type": "string" }
+            },
+            "total_checked": { "type": "int32" },
+            "total_available": { "type": "int32" },
+            "timestamp": { "type": "float64" }
+          },
+          "required": ["available_capabilities", "total_checked", "total_available", "timestamp"]
+        },
+        "shell_execution": {
+          "properties": {
+            "result_type": { "enum": ["shell_execution"] },
+            "stdout": { "type": "string" },
+            "stderr": { "type": "string" },
+            "exit_code": { "type": "int32" },
+            "success": { "type": "boolean" }
+          },
+          "required": ["stdout", "stderr", "exit_code", "success"]
+        },
+        "file_read": {
+          "properties": {
+            "result_type": { "enum": ["file_read"] },
+            "content": { "type": "string" },
+            "size": { "type": "int32" },
+            "exists": { "type": "boolean" }
+          },
+          "required": ["exists"]
+        },
+        "file_write": {
+          "properties": {
+            "result_type": { "enum": ["file_write"] },
+            "success": { "type": "boolean" },
+            "bytes_written": { "type": "int32" }
+          },
+          "required": ["success", "bytes_written"]
+        },
+        "database_query": {
+          "properties": {
+            "result_type": { "enum": ["database_query"] },
+            "success": { "type": "boolean" },
+            "rows": {
+              "elements": {
+                "elements": { "type": "string" }
+              }
+            },
+            "row_count": { "type": "int32" }
+          },
+          "required": ["success", "rows", "row_count"]
+        },
+        "security_operation": {
+          "properties": {
+            "result_type": { "enum": ["security_operation"] },
+            "success": { "type": "boolean" },
+            "message": { "type": "string" }
+          },
+          "required": ["success"]
+        },
+        "security_export": {
+          "properties": {
+            "result_type": { "enum": ["security_export"] },
+            "success": { "type": "boolean" },
+            "security_config": {
+              "properties": {
+                "mode": { "type": "string" },
+                "password": { "type": "string" },
+                "totp_secret": { "type": "string" },
+                "timeout": { "type": "int32" },
+                "extendable": { "type": "boolean" },
+                "promiscuous_enabled": { "type": "boolean" },
+                "promiscuous_auth_mode": { "type": "string" }
+              }
+            }
+          },
+          "required": ["success"]
+        },
+        "error": {
+          "properties": {
+            "result_type": { "enum": ["error"] },
+            "error": { "type": "string" }
+          },
+          "required": ["error"]
+        }
+      }
+    }
+  },
+  
+  "discriminator": "type",
+  "mapping": {
+    "welcome": { "ref": "WelcomeMessage" },
+    "ping": { "ref": "PingMessage" },
+    "pong": { "ref": "PongMessage" },
+    "command": { "ref": "CommandMessage" },
+    "response": { "ref": "ResponseMessage" },
+    "error": { "ref": "ErrorMessage" },
+    "status": { "ref": "StatusMessage" }
+  }
+}
