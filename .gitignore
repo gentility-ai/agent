@@ -56,3 +56,6 @@ Thumbs.db
 
 # Build system artifacts
 target/
+
+# Homebrew tap (symlinked directory)
+homebrew-agent/
