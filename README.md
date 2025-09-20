@@ -83,9 +83,14 @@ sudo chmod +x /usr/local/bin/gentility
 After installation, configure the agent with your access token using the setup command:
 
 ```bash
-# Quick setup (recommended)
-sudo gentility setup YOUR_TOKEN_HERE
+# Quick setup (recommended) - Creates or updates configuration
+gentility setup YOUR_TOKEN_HERE
 ```
+
+The `setup` command will:
+- Create a new config file if none exists
+- Update the token in an existing config file (preserving other settings)
+- Handle both commented and uncommented token lines
 
 Or manually edit the configuration:
 

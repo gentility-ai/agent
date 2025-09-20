@@ -5,12 +5,8 @@ bin_dir := "bin"
 # Default to amd64 for production deployments
 arch := env_var_or_default("TARGET_ARCH", "amd64")
 
-# Get current source hash (excluding the VERSION line to avoid feedback loop)
-current_hash := `grep -v 'VERSION = ' src/agent.cr | shasum -a 256 | cut -d' ' -f1`
-lockfile_version := `cat .version-lock.json 2>/dev/null | jq -r '.current_version // "1.0.0"' 2>/dev/null || echo "1.0.0"`
-lockfile_hash := `cat .version-lock.json 2>/dev/null | jq -r '.source_hash // ""' 2>/dev/null || echo ""`
-
-version := lockfile_version
+# Read version from VERSION file
+version := `cat VERSION 2>/dev/null || echo "1.0.0"`
 deb_file := "packages/" + binary_name + "_" + version + "_" + arch + ".deb"
 
 # Show available commands
@@ -283,45 +279,50 @@ repo-sync-remote remote_path:
     rsync -avz --delete ./public/ {{remote_path}}
     @echo "Repository synced to remote server"
 
-# Complete release workflow (build, package, and deploy to nginx)
+# Complete release workflow (build, package, and deploy)
 release type="patch":
     #!/bin/bash
     set -e
     echo "🚀 Starting automated release workflow..."
-    just version-update {{type}}
+
+    # Bump version
+    just version-bump {{type}}
+
+    # Get new version
+    current_version=$(cat VERSION)
+
     echo ""
-
-    # Get current version after update
-    current_version=$(cat .version-lock.json | jq -r '.current_version')
-
-    # Commit version changes
-    echo "📝 Committing version changes..."
-    git add -A
-    git commit -m "Bump version to v${current_version}" || echo "No changes to commit"
-
-    # Create and push tag
-    echo "🏷️  Creating git tag v${current_version}..."
-    git tag "v${current_version}"
-
     echo "📦 Building and packaging..."
     just package-amd64
+
     echo ""
     echo "📤 Adding to repository and deploying..."
     just repo-add-amd64
     just deploy-packages
+
     echo ""
+    echo "📝 Committing version changes..."
+    git add -A
+    git commit -m "Release v${current_version}"
 
-    # Update README with latest version
-    echo "📝 Updating README with version ${current_version}..."
-    sed -i '' "s/gentility-agent_[0-9]\+\.[0-9]\+\.[0-9]\+_amd64\.deb/gentility-agent_${current_version}_amd64.deb/g" README.md
+    echo "🏷️  Creating git tag v${current_version}..."
+    git tag "v${current_version}"
 
-    # Commit README update if changed
-    git add README.md
-    git commit -m "Update README with version ${current_version}" || echo "README already up to date"
-
-    # Push everything
     echo "🚀 Pushing to GitHub..."
-    git push origin main --tags
+    git push origin master --tags
+
+    echo ""
+    echo "📦 Creating GitHub release..."
+    # Build macOS binary for GitHub release
+    just build-macos
+
+    # Create GitHub release with assets
+    gh release create "v${current_version}" \
+        --repo gentility-ai/gentility-agent \
+        --title "Release v${current_version}" \
+        --generate-notes \
+        "packages/gentility-agent_${current_version}_amd64.deb#Linux AMD64 DEB Package" \
+        "bin/gentility-agent-${current_version}-darwin-"*"#macOS Binary"
 
     # Push homebrew-agent tap update if it exists
     if [ -d "homebrew-agent" ]; then
@@ -329,18 +330,19 @@ release type="patch":
         cd homebrew-agent
         git add Formula/gentility-agent.rb
         git commit -m "Update to version ${current_version}" || echo "No changes in tap"
-        git push origin main || echo "Failed to push tap - may need to set up remote"
+        git push origin master || echo "Failed to push tap - may need to set up remote"
         cd ..
     fi
 
+    echo ""
     echo "✅ Release v${current_version} completed successfully!"
     echo ""
     echo "📊 Release Summary:"
     echo "  Version: ${current_version}"
     echo "  Package: {{binary_name}}_${current_version}_amd64.deb"
     echo "  Repository: https://packages.gentility.ai/debian/"
+    echo "  GitHub Release: https://github.com/gentility-ai/gentility-agent/releases/tag/v${current_version}"
     echo "  Git tag: v${current_version}"
-    echo "  README updated with new version"
     echo "  Homebrew formula updated"
 
 # Legacy S3 release workflow
@@ -394,33 +396,15 @@ install-tools:
     @which nfpm >/dev/null || (echo "Installing nfpm..." && curl -sfL https://install.goreleaser.com/github.com/goreleaser/nfpm.sh | sh -s -- -b ~/.local/bin)
     @which aptly >/dev/null || (echo "Please install aptly: apt-get install aptly"; exit 1)
 
-# Check version status and update if source changed
-version-check:
-    @echo "Version Status:"
-    @echo "  Current version: {{version}}"
-    @echo "  Current source hash: {{current_hash}}"
-    @echo "  Lockfile hash: {{lockfile_hash}}"
-    @if [ "{{current_hash}}" != "{{lockfile_hash}}" ]; then \
-        echo "  🔄 Source has changed - version needs to be updated"; \
-        echo "  Run 'just version-update' to increment version"; \
-    else \
-        echo "  ✅ Version {{version}} is up to date with source"; \
-    fi
+# Show current version
+version:
+    @echo "Current version: {{version}}"
 
-# Update version automatically when source changes
-version-update type="patch":
+# Bump version
+version-bump type="patch":
     #!/bin/bash
     set -e
 
-    current_hash_check=$(grep -v 'VERSION = ' src/agent.cr | shasum -a 256 | cut -d' ' -f1)
-    lockfile_hash_check=$(cat .version-lock.json 2>/dev/null | jq -r '.source_hash // ""' 2>/dev/null || echo "")
-
-    if [ "$current_hash_check" = "$lockfile_hash_check" ] && [ ! -z "$lockfile_hash_check" ]; then
-        echo "✅ Source hasn't changed, no version update needed"
-        exit 0
-    fi
-
-    echo "🔄 Source has changed, incrementing version..."
     current_version={{version}}
     IFS='.' read -r major minor patch <<< "$current_version"
 
@@ -432,43 +416,59 @@ version-update type="patch":
         new_version="$major.$minor.$((patch + 1))"
     fi
 
-    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    echo "  📝 Updating version from $current_version to $new_version"
+    echo "📝 Updating version from $current_version to $new_version"
 
-    # Update version in source files
-    sed -i '' "s/VERSION = \"$current_version\"/VERSION = \"$new_version\"/" src/agent.cr
+    # Update VERSION file
+    echo "$new_version" > VERSION
+    echo "  ✅ Updated VERSION file"
+
+    # Update nfpm configs
     sed -i '' "s/version: \"$current_version\"/version: \"$new_version\"/" nfpm.yaml nfpm-arm64.yaml 2>/dev/null || true
+    echo "  ✅ Updated nfpm configs"
 
-    # Update Homebrew formula
+    # Update Homebrew formulas
     if [ -f "Formula/gentility-agent.rb" ]; then
         sed -i '' "s/tag: \"v$current_version\"/tag: \"v$new_version\"/" Formula/gentility-agent.rb
-        echo "  📦 Updated Homebrew formula"
+        echo "  ✅ Updated Homebrew formula"
     fi
 
-    # Update homebrew-agent tap if it exists
     if [ -f "homebrew-agent/Formula/gentility-agent.rb" ]; then
         sed -i '' "s/tag: \"v$current_version\"/tag: \"v$new_version\"/" homebrew-agent/Formula/gentility-agent.rb
-        echo "  📦 Updated Homebrew tap formula"
+        echo "  ✅ Updated Homebrew tap formula"
     fi
 
-    # Update version lock
-    old_entry=$(cat .version-lock.json 2>/dev/null | jq -c '{version: .current_version, hash: .source_hash, timestamp: .last_updated}' 2>/dev/null || echo '{}')
-    new_hash=$(grep -v 'VERSION = ' src/agent.cr | shasum -a 256 | cut -d' ' -f1)
+    # Update README if it contains version references
+    sed -i '' "s/gentility-agent_${current_version}_/gentility-agent_${new_version}_/g" README.md 2>/dev/null || true
 
-    cat .version-lock.json 2>/dev/null | jq --arg version "$new_version" --arg hash "$new_hash" --arg timestamp "$timestamp" --argjson old "$old_entry" \
-        '.current_version = $version | .source_hash = $hash | .last_updated = $timestamp | .history = ((.history // []) + [$old])[-10:]' > .version-lock.json.tmp && mv .version-lock.json.tmp .version-lock.json || \
-    echo "{\"current_version\": \"$new_version\", \"source_hash\": \"$new_hash\", \"last_updated\": \"$timestamp\", \"history\": []}" | jq . > .version-lock.json
-
-    echo "  ✅ Version updated to $new_version and lockfile saved"
     echo ""
-    echo "  🏷️  To create git tag and push:"
-    echo "      git add -A"
-    echo "      git commit -m \"Bump version to v$new_version\""
-    echo "      git tag v$new_version"
-    echo "      git push origin main --tags"
+    echo "✅ Version bumped to $new_version"
+    echo ""
+    echo "Next steps:"
+    echo "  1. Test the changes: just build-macos"
+    echo "  2. Commit and tag: just release-commit"
 
-# Force version bump (manual override)
-version-bump type="patch":
+# Commit and tag after version bump
+release-commit:
+    #!/bin/bash
+    set -e
+
+    current_version={{version}}
+
+    # Stage all version-related files
+    git add VERSION nfpm.yaml Formula/gentility-agent.rb README.md homebrew-agent/Formula/gentility-agent.rb 2>/dev/null || true
+
+    # Commit
+    git commit -m "Bump version to v${current_version}"
+
+    # Create tag
+    git tag "v${current_version}"
+
+    echo "✅ Committed and tagged v${current_version}"
+    echo ""
+    echo "To push: git push origin master --tags"
+
+# OLD: Force version bump (manual override)
+old-version-bump type="patch":
     @echo "Manually bumping version ({{type}})..."
     @current_version={{version}}; \
     IFS='.' read -r major minor patch <<< "$current_version"; \
@@ -495,13 +495,6 @@ info:
     @echo "Build Information:"
     @echo "  Binary name: {{binary_name}}"
     @echo "  Current version: {{version}}"
-    @echo "  Source hash: {{current_hash}}"
-    @echo "  Lockfile hash: {{lockfile_hash}}"
-    @if [ "{{current_hash}}" != "{{lockfile_hash}}" ]; then \
-        echo "  Status: 🔄 Source changed, version will be updated on next build"; \
-    else \
-        echo "  Status: ✅ Up to date"; \
-    fi
     @echo ""
     @echo "Available binaries:"
     @ls -lh {{bin_dir}}/{{binary_name}}-* 2>/dev/null || echo "  No binaries built yet"

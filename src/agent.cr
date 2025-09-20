@@ -29,8 +29,8 @@ require "file"
 require "crotp"
 require "qr-code"
 
-# ALWAYS UPDATE THIS VERSION IF YOU CHANGE THIS FILE
-VERSION = "1.0.26"
+# Read version from VERSION file at compile time
+VERSION = {{ read_file("VERSION").strip }}
 
 # Global security state management
 module Security
@@ -276,11 +276,16 @@ class GentilityAgent
     @running = true
     retry_count = 0
     max_retries = -1 # Infinite retries
+    base_backoff = 1.0 # Start with 1 second
+    max_backoff = 300.0 # Cap at 5 minutes
+    current_backoff = base_backoff
 
     while @running
       begin
         connect
-        retry_count = 0 # Reset retry count on successful connection
+        # Reset backoff on successful connection
+        retry_count = 0
+        current_backoff = base_backoff
 
         # Keep the main fiber alive while connected
         while @running && @websocket && !@websocket.not_nil!.closed?
@@ -300,8 +305,16 @@ class GentilityAgent
             puts "Maximum retry attempts (#{max_retries}) reached. Exiting..."
             exit 1
           else
-            puts "Waiting 5 seconds before reconnection attempt..."
-            sleep 5.seconds
+            # Exponential backoff with jitter
+            jitter = Random.rand * 0.3 * current_backoff # Add 0-30% jitter
+            wait_time = current_backoff + jitter
+
+            puts "Waiting #{wait_time.round(1)} seconds before reconnection attempt (exponential backoff)..."
+            sleep wait_time.seconds
+
+            # Double the backoff for next time, but cap at max_backoff
+            current_backoff = [current_backoff * 2.0, max_backoff].min
+
             puts "Attempting to reconnect..."
           end
         end
@@ -1046,10 +1059,51 @@ def setup_config(token : String)
 
   # Check if config file already exists
   if File.exists?(config_file)
-    puts "⚠️  Configuration file #{config_file} already exists!"
-    puts "To avoid overwriting your settings, please edit it manually or remove it first."
-    puts "Current token line should be: GENTILITY_TOKEN=#{token}"
-    exit 1
+    puts "📝 Configuration file #{config_file} already exists."
+    puts "Updating GENTILITY_TOKEN..."
+
+    # Read existing config
+    content = File.read(config_file)
+    lines = content.split('\n')
+    token_updated = false
+
+    # Update or add the GENTILITY_TOKEN line
+    updated_lines = lines.map do |line|
+      # Match commented or uncommented GENTILITY_TOKEN lines
+      if line.matches?(/^\s*#?\s*GENTILITY_TOKEN\s*=/)
+        token_updated = true
+        "GENTILITY_TOKEN=#{token}"
+      else
+        line
+      end
+    end
+
+    # If no GENTILITY_TOKEN line was found, add it after the header comments
+    unless token_updated
+      # Find the first non-comment line or end of initial comments
+      insert_index = 0
+      updated_lines.each_with_index do |line, i|
+        if !line.starts_with?("#") && !line.strip.empty?
+          insert_index = i
+          break
+        end
+      end
+      updated_lines.insert(insert_index, "")
+      updated_lines.insert(insert_index + 1, "# REQUIRED: Your Gentility AI access token")
+      updated_lines.insert(insert_index + 2, "GENTILITY_TOKEN=#{token}")
+      token_updated = true
+    end
+
+    # Write updated config
+    File.write(config_file, updated_lines.join('\n'))
+    puts "✅ Token updated in #{config_file}"
+    puts ""
+    puts "You can now start the service with:"
+    puts "  gentility run"
+    puts "  # Or as a service:"
+    puts "  brew services start gentility-agent  # macOS"
+    puts "  sudo systemctl start gentility        # Linux"
+    exit 0
   end
 
   # Check if we have permissions to write to /etc
@@ -1524,8 +1578,16 @@ def main
   end
 
   # Check for setup command
-  if ARGV.size >= 2 && ARGV[0] == "setup"
-    setup_config(ARGV[1])
+  if ARGV[0] == "setup"
+    if ARGV.size >= 2
+      setup_config(ARGV[1])
+      exit 0
+    else
+      puts "Usage: #{PROGRAM_NAME} setup <token>"
+      puts ""
+      puts "Example: #{PROGRAM_NAME} setup gnt_1234567890abcdef"
+      exit 1
+    end
   end
 
   # Check for security setup commands
