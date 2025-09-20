@@ -326,14 +326,35 @@ release type="patch":
         just repo-add-amd64
     fi
 
-    # Deploy with conflict resolution
-    if ! just deploy-packages; then
-        echo "⚠️  Deployment failed, attempting force update..."
-        aptly -config=configs/aptly.conf publish update -force-overwrite stable filesystem:local:debian || {
+    # Deploy with conflict resolution (using current version)
+    echo "🚀 Publishing repository with version ${current_version}..."
+    if aptly -config=configs/aptly.conf publish list | grep -q "stable"; then
+        echo "Repository already published, updating..."
+        if ! aptly -config=configs/aptly.conf publish update -force-overwrite stable filesystem:local:debian; then
             echo "🚨 Force update failed, dropping and republishing..."
             aptly -config=configs/aptly.conf publish drop stable filesystem:local:debian
-            just repo-publish-local
-        }
+            if [ -f .env ]; then
+                export $(cat .env | grep -v '^#' | xargs) && \
+                aptly -config=configs/aptly.conf publish repo -distribution=stable -gpg-key="${GPG_KEY_ID}" gentility-main filesystem:local:debian
+            else
+                aptly -config=configs/aptly.conf publish repo -distribution=stable -gpg-key=85C6BE5B453A071B gentility-main filesystem:local:debian
+            fi
+        fi
+    else
+        echo "Publishing repository for first time..."
+        if [ -f .env ]; then
+            export $(cat .env | grep -v '^#' | xargs) && \
+            aptly -config=configs/aptly.conf publish repo -distribution=stable -gpg-key="${GPG_KEY_ID}" gentility-main filesystem:local:debian
+        else
+            aptly -config=configs/aptly.conf publish repo -distribution=stable -gpg-key=85C6BE5B453A071B gentility-main filesystem:local:debian
+        fi
+    fi
+
+    echo "📤 Deploying to packages.gentility.ai..."
+    if which ansible-playbook >/dev/null; then
+        ansible-playbook -i ansible/inventory/hosts.yml ansible/playbooks/deploy-packages.yml
+    else
+        echo "⚠️  Ansible not found, skipping remote deployment. Repository published locally to ./public/"
     fi
 
     echo ""
@@ -357,22 +378,26 @@ release type="patch":
 
     echo ""
     echo "📦 Creating GitHub release..."
-    # Build macOS binary for GitHub release
-    if ! just build-macos; then
-        echo "⚠️  macOS build failed, continuing with Linux package only..."
+    # Build macOS ARM64 binary only (we only support ARM64)
+    echo "🍎 Building macOS ARM64 binary..."
+    if ! just build-local-arm64; then
+        echo "⚠️  macOS ARM64 build failed, continuing with Linux package only..."
         macos_binary=""
         arch_label=""
     else
-        # Determine macOS binary architecture
-        arch=$(uname -m)
-        if [ "$arch" = "arm64" ]; then
-            macos_binary="bin/gentility-agent-${current_version}-darwin-arm64"
-            arch_label="macOS ARM64 Binary"
-        else
-            macos_binary="bin/gentility-agent-${current_version}-darwin-x86_64"
-            arch_label="macOS x86_64 Binary"
-        fi
+        macos_binary="bin/gentility-agent-${current_version}-darwin-arm64"
+        arch_label="macOS ARM64 Binary"
+        echo "✅ macOS ARM64 binary built: ${macos_binary}"
     fi
+
+    # Verify the Linux AMD64 DEB package exists (should be built remotely)
+    linux_deb="packages/gentility-agent_${current_version}_amd64.deb"
+    if [ ! -f "$linux_deb" ]; then
+        echo "❌ Linux AMD64 DEB package not found: $linux_deb"
+        echo "Make sure 'just package-amd64' completed successfully"
+        exit 1
+    fi
+    echo "✅ Linux AMD64 DEB package found: ${linux_deb}"
 
     # Check if release already exists and delete it
     if gh release view "v${current_version}" >/dev/null 2>&1; then
@@ -386,13 +411,13 @@ release type="patch":
         gh release create "v${current_version}" \
             --title "Release v${current_version}" \
             --generate-notes \
-            "packages/gentility-agent_${current_version}_amd64.deb#Linux AMD64 DEB Package" \
+            "${linux_deb}#Linux AMD64 DEB Package" \
             "${macos_binary}#${arch_label}"
     else
         gh release create "v${current_version}" \
             --title "Release v${current_version}" \
             --generate-notes \
-            "packages/gentility-agent_${current_version}_amd64.deb#Linux AMD64 DEB Package"
+            "${linux_deb}#Linux AMD64 DEB Package"
     fi
 
     # Push homebrew-agent tap update if it exists
