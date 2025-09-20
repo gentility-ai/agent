@@ -316,13 +316,23 @@ release type="patch":
     # Build macOS binary for GitHub release
     just build-macos
 
+    # Determine macOS binary architecture and create GitHub release
+    arch=$(uname -m)
+    if [ "$arch" = "arm64" ]; then
+        macos_binary="bin/gentility-agent-${current_version}-darwin-arm64"
+        arch_label="macOS ARM64 Binary"
+    else
+        macos_binary="bin/gentility-agent-${current_version}-darwin-x86_64"
+        arch_label="macOS x86_64 Binary"
+    fi
+
     # Create GitHub release with assets
     gh release create "v${current_version}" \
         --repo gentility-ai/gentility-agent \
         --title "Release v${current_version}" \
         --generate-notes \
         "packages/gentility-agent_${current_version}_amd64.deb#Linux AMD64 DEB Package" \
-        "bin/gentility-agent-${current_version}-darwin-"*"#macOS Binary"
+        "${macos_binary}#${arch_label}"
 
     # Push homebrew-agent tap update if it exists
     if [ -d "homebrew-agent" ]; then
