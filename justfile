@@ -288,8 +288,23 @@ release type="patch":
     # Bump version
     just version-bump {{type}}
 
-    # Get new version
+    # Get new version and validate consistency
     current_version=$(cat VERSION)
+    echo "🔍 Validating version consistency..."
+
+    # Check if all config files have consistent versions
+    nfpm_version=$(grep "^version:" nfpm.yaml | sed 's/version: "\(.*\)"/\1/')
+    nfpm_arm64_version=$(grep "^version:" nfpm-arm64.yaml | sed 's/version: "\(.*\)"/\1/')
+
+    if [ "$current_version" != "$nfpm_version" ] || [ "$current_version" != "$nfpm_arm64_version" ]; then
+        echo "❌ Version mismatch detected!"
+        echo "  VERSION file: $current_version"
+        echo "  nfpm.yaml: $nfpm_version"
+        echo "  nfpm-arm64.yaml: $nfpm_arm64_version"
+        echo "🔧 Auto-fixing version inconsistencies..."
+        sed -i '' "s/version: \".*\"/version: \"$current_version\"/" nfpm.yaml nfpm-arm64.yaml
+        echo "✅ Version files synchronized"
+    fi
 
     echo ""
     echo "📦 Building and packaging..."
@@ -297,13 +312,42 @@ release type="patch":
 
     echo ""
     echo "📤 Adding to repository and deploying..."
-    just repo-add-amd64
-    just deploy-packages
+
+    # Try to add package, handle conflicts gracefully
+    if ! just repo-add-amd64; then
+        echo "⚠️  Package addition failed, attempting conflict resolution..."
+
+        # Remove any existing package with same name but different version
+        echo "🧹 Cleaning conflicting packages..."
+        aptly -config=configs/aptly.conf repo remove gentility-main 'gentility-agent' || echo "No existing packages to remove"
+
+        # Retry adding the package
+        echo "🔄 Retrying package addition..."
+        just repo-add-amd64
+    fi
+
+    # Deploy with conflict resolution
+    if ! just deploy-packages; then
+        echo "⚠️  Deployment failed, attempting force update..."
+        aptly -config=configs/aptly.conf publish update -force-overwrite stable filesystem:local:debian || {
+            echo "🚨 Force update failed, dropping and republishing..."
+            aptly -config=configs/aptly.conf publish drop stable filesystem:local:debian
+            just repo-publish-local
+        }
+    fi
 
     echo ""
     echo "📝 Committing version changes..."
-    git add -A
-    git commit -m "Release v${current_version}"
+    # Stage only release-related files
+    git add VERSION nfpm.yaml nfpm-arm64.yaml justfile Formula/gentility-agent.rb README.md 2>/dev/null || true
+    git commit -m "Release v${current_version}" || echo "No changes to commit"
+
+    # Check if tag already exists
+    if git tag -l "v${current_version}" | grep -q "v${current_version}"; then
+        echo "⚠️  Tag v${current_version} already exists, removing it..."
+        git tag -d "v${current_version}"
+        git push origin --delete "v${current_version}" 2>/dev/null || echo "Tag not on remote"
+    fi
 
     echo "🏷️  Creating git tag v${current_version}..."
     git tag "v${current_version}"
@@ -314,25 +358,42 @@ release type="patch":
     echo ""
     echo "📦 Creating GitHub release..."
     # Build macOS binary for GitHub release
-    just build-macos
-
-    # Determine macOS binary architecture and create GitHub release
-    arch=$(uname -m)
-    if [ "$arch" = "arm64" ]; then
-        macos_binary="bin/gentility-agent-${current_version}-darwin-arm64"
-        arch_label="macOS ARM64 Binary"
+    if ! just build-macos; then
+        echo "⚠️  macOS build failed, continuing with Linux package only..."
+        macos_binary=""
+        arch_label=""
     else
-        macos_binary="bin/gentility-agent-${current_version}-darwin-x86_64"
-        arch_label="macOS x86_64 Binary"
+        # Determine macOS binary architecture
+        arch=$(uname -m)
+        if [ "$arch" = "arm64" ]; then
+            macos_binary="bin/gentility-agent-${current_version}-darwin-arm64"
+            arch_label="macOS ARM64 Binary"
+        else
+            macos_binary="bin/gentility-agent-${current_version}-darwin-x86_64"
+            arch_label="macOS x86_64 Binary"
+        fi
+    fi
+
+    # Check if release already exists and delete it
+    if gh release view "v${current_version}" >/dev/null 2>&1; then
+        echo "⚠️  Release v${current_version} already exists, deleting it..."
+        gh release delete "v${current_version}" --yes
     fi
 
     # Create GitHub release with assets
-    gh release create "v${current_version}" \
-        --repo gentility-ai/gentility-agent \
-        --title "Release v${current_version}" \
-        --generate-notes \
-        "packages/gentility-agent_${current_version}_amd64.deb#Linux AMD64 DEB Package" \
-        "${macos_binary}#${arch_label}"
+    echo "🚀 Creating GitHub release..."
+    if [ -n "$macos_binary" ] && [ -f "$macos_binary" ]; then
+        gh release create "v${current_version}" \
+            --title "Release v${current_version}" \
+            --generate-notes \
+            "packages/gentility-agent_${current_version}_amd64.deb#Linux AMD64 DEB Package" \
+            "${macos_binary}#${arch_label}"
+    else
+        gh release create "v${current_version}" \
+            --title "Release v${current_version}" \
+            --generate-notes \
+            "packages/gentility-agent_${current_version}_amd64.deb#Linux AMD64 DEB Package"
+    fi
 
     # Push homebrew-agent tap update if it exists
     if [ -d "homebrew-agent" ]; then
