@@ -535,6 +535,7 @@ version-bump type="patch":
 
     # Update README if it contains version references
     sed -i '' "s/gentility-agent_${current_version}_/gentility-agent_${new_version}_/g" README.md 2>/dev/null || true
+    sed -i '' "s/download/v${current_version}/download\/v${new_version}/g" README.md 2>/dev/null || true
 
     echo ""
     echo "✅ Version bumped to $new_version"
