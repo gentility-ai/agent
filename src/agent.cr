@@ -275,8 +275,8 @@ class GentilityAgent
 
     @running = true
     retry_count = 0
-    max_retries = -1 # Infinite retries
-    base_backoff = 1.0 # Start with 1 second
+    max_retries = -1    # Infinite retries
+    base_backoff = 1.0  # Start with 1 second
     max_backoff = 300.0 # Cap at 5 minutes
     current_backoff = base_backoff
 
@@ -547,6 +547,7 @@ class GentilityAgent
       credential = params.try(&.["credential"]?.try(&.to_s))
       if credential
         if Security.activate(credential)
+          send_status # Send updated security status
           {"success" => true, "message" => "Agent activated successfully"}
         else
           {"error" => "Invalid credentials"}
@@ -556,6 +557,7 @@ class GentilityAgent
       end
     when "lock"
       Security.deactivate
+      send_status # Send updated security status
       {"success" => true, "message" => "Agent deactivated"}
     when "export_security"
       credential = params.try(&.["credential"]?.try(&.to_s))
@@ -576,6 +578,7 @@ class GentilityAgent
         if mode && (mode == "none" || password || totp_secret)
           Security.configure(mode, password, totp_secret, timeout, extendable)
           save_security_config(mode, password, totp_secret, timeout, extendable)
+          send_status # Send updated security status
           {"success" => true, "message" => "Security configuration updated"}
         else
           {"error" => "Invalid security configuration parameters"}
@@ -583,6 +586,10 @@ class GentilityAgent
       else
         {"error" => "Agent activation required to change security settings"}
       end
+    when "get_status"
+      # Send current status and return success
+      send_status
+      {"success" => true, "message" => "Status update sent"}
     else
       {"error" => "Unknown command: #{command}"}
     end
