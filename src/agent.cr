@@ -610,24 +610,25 @@ class GentilityAgent
   end
 
   private def check_capabilities(capabilities_list : Array(MessagePack::Type))
-    available_capabilities = [] of String
+    available_packages = [] of String
 
     capabilities_list.each do |capability|
       if capability_name = capability.try(&.to_s)
         if command_available?(capability_name)
-          available_capabilities << capability_name
+          available_packages << capability_name
         end
       end
     end
 
     {
-      "available_capabilities" => available_capabilities,
+      "available_capabilities" => available_packages, # Keep old name for backward compatibility
+      "available_packages"     => available_packages, # New name
       "total_checked"          => capabilities_list.size,
-      "total_available"        => available_capabilities.size,
+      "total_available"        => available_packages.size,
       "timestamp"              => Time.utc.to_unix_f,
     }
   rescue ex : Exception
-    {"error" => "Failed to check capabilities: #{ex.message}"}
+    {"error" => "Failed to check packages: #{ex.message}"}
   end
 
   private def command_available?(command : String) : Bool
@@ -636,6 +637,24 @@ class GentilityAgent
     !result.empty?
   rescue
     false
+  end
+
+  private def get_available_tools
+    [
+      "ping",
+      "system_info",
+      "check_capabilities",
+      "execute",
+      "file_read",
+      "file_write",
+      "psql_query",
+      "mysql_query",
+      "activate",
+      "lock",
+      "export_security",
+      "configure_security",
+      "get_status",
+    ]
   end
 
   private def execute_shell_command(cmd : String)
@@ -812,6 +831,7 @@ class GentilityAgent
       "nickname"      => @nickname,
       "uptime"        => Time.monotonic.total_seconds,
       "timestamp"     => Time.utc.to_unix_f,
+      "tools"         => get_available_tools,
     }
 
     # Merge security status
