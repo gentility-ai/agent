@@ -37,11 +37,11 @@ module Security
   @@mode : String = "none"
   @@password : String? = nil
   @@totp_secret : String? = nil
-  @@activation_timeout : Int32 = 1800
+  @@unlock_timeout : Int32 = 1800
   @@extendable : Bool = true
   @@active : Bool = false
-  @@activation_time : Time? = nil
-  @@initial_activation_time : Time? = nil
+  @@unlock_time : Time? = nil
+  @@initial_unlock_time : Time? = nil
   @@promiscuous_enabled : Bool = true
   @@promiscuous_auth_mode : String = "password"
 
@@ -49,7 +49,7 @@ module Security
     @@mode = mode
     @@password = password
     @@totp_secret = totp_secret
-    @@activation_timeout = timeout
+    @@unlock_timeout = timeout
     @@extendable = extendable
     @@promiscuous_enabled = promiscuous_enabled
     @@promiscuous_auth_mode = promiscuous_auth_mode
@@ -59,30 +59,30 @@ module Security
     @@mode
   end
 
-  def self.activated?
+  def self.unlocked?
     return true if @@mode == "none"
 
     return false unless @@active
 
     now = Time.utc
-    return false unless @@activation_time && @@initial_activation_time
+    return false unless @@unlock_time && @@initial_unlock_time
 
-    # Check if we've exceeded the hard timeout from initial activation
-    if now - @@initial_activation_time.not_nil! > @@activation_timeout.seconds
-      deactivate
+    # Check if we've exceeded the hard timeout from initial unlock
+    if now - @@initial_unlock_time.not_nil! > @@unlock_timeout.seconds
+      lock
       return false
     end
 
     # If extendable, also check the rolling timeout
-    if @@extendable && now - @@activation_time.not_nil! > @@activation_timeout.seconds
-      deactivate
+    if @@extendable && now - @@unlock_time.not_nil! > @@unlock_timeout.seconds
+      lock
       return false
     end
 
     true
   end
 
-  def self.activate(password_or_totp : String) : Bool
+  def self.unlock(password_or_totp : String) : Bool
     return true if @@mode == "none"
 
     success = case @@mode
@@ -97,35 +97,35 @@ module Security
     if success
       now = Time.utc
       @@active = true
-      @@activation_time = now
-      @@initial_activation_time = now unless @@initial_activation_time
+      @@unlock_time = now
+      @@initial_unlock_time = now unless @@initial_unlock_time
     end
 
     !!success
   end
 
-  def self.extend_activation
+  def self.extend_unlock
     return unless @@active && @@extendable
-    @@activation_time = Time.utc
+    @@unlock_time = Time.utc
   end
 
-  def self.deactivate
+  def self.lock
     @@active = false
-    @@activation_time = nil
-    @@initial_activation_time = nil
+    @@unlock_time = nil
+    @@initial_unlock_time = nil
   end
 
   def self.time_remaining : Int32
     return -1 if @@mode == "none" || !@@active
-    return 0 unless @@activation_time && @@initial_activation_time
+    return 0 unless @@unlock_time && @@initial_unlock_time
 
     now = Time.utc
-    initial_elapsed = (now - @@initial_activation_time.not_nil!).total_seconds.to_i
-    hard_remaining = @@activation_timeout - initial_elapsed
+    initial_elapsed = (now - @@initial_unlock_time.not_nil!).total_seconds.to_i
+    hard_remaining = @@unlock_timeout - initial_elapsed
 
     if @@extendable
-      rolling_elapsed = (now - @@activation_time.not_nil!).total_seconds.to_i
-      rolling_remaining = @@activation_timeout - rolling_elapsed
+      rolling_elapsed = (now - @@unlock_time.not_nil!).total_seconds.to_i
+      rolling_remaining = @@unlock_timeout - rolling_elapsed
       [hard_remaining, rolling_remaining].min
     else
       hard_remaining
@@ -136,7 +136,7 @@ module Security
     {
       "security_enabled" => @@mode != "none",
       "security_mode"    => @@mode,
-      "active"           => activated?,
+      "active"           => unlocked?,
       "time_remaining"   => time_remaining,
       "extendable"       => @@extendable,
     }
@@ -168,7 +168,7 @@ module Security
         "mode"                  => @@mode,
         "password"              => @@password,
         "totp_secret"           => @@totp_secret,
-        "timeout"               => @@activation_timeout,
+        "timeout"               => @@unlock_timeout,
         "extendable"            => @@extendable,
         "promiscuous_enabled"   => @@promiscuous_enabled,
         "promiscuous_auth_mode" => @@promiscuous_auth_mode,
@@ -209,7 +209,7 @@ class GentilityAgent
     mode = config["SECURITY_MODE"]? || "none"
     password = config["SECURITY_PASSWORD"]?
     totp_secret = config["SECURITY_TOTP_SECRET"]?
-    timeout = config["SECURITY_ACTIVATION_TIMEOUT"]?.try(&.to_i?) || 1800
+    timeout = config["SECURITY_UNLOCK_TIMEOUT"]?.try(&.to_i?) || 1800
     extendable = parse_boolean(config["SECURITY_EXTENDABLE"]?, true)
     promiscuous_enabled = parse_boolean(config["PROMISCUOUS_ENABLED"]?, true)
     promiscuous_auth_mode = config["PROMISCUOUS_AUTH_MODE"]? || "password"
@@ -240,7 +240,7 @@ class GentilityAgent
 
     # Update or add security settings
     updated_config = [] of String
-    security_keys = ["SECURITY_MODE", "SECURITY_PASSWORD", "SECURITY_TOTP_SECRET", "SECURITY_ACTIVATION_TIMEOUT", "SECURITY_EXTENDABLE"]
+    security_keys = ["SECURITY_MODE", "SECURITY_PASSWORD", "SECURITY_TOTP_SECRET", "SECURITY_UNLOCK_TIMEOUT", "SECURITY_EXTENDABLE"]
 
     existing_config.each do |line|
       # Skip existing security lines - we'll add new ones
@@ -254,7 +254,7 @@ class GentilityAgent
     updated_config << "SECURITY_MODE=#{mode}"
     updated_config << "SECURITY_PASSWORD=#{password}" if password
     updated_config << "SECURITY_TOTP_SECRET=#{totp_secret}" if totp_secret
-    updated_config << "SECURITY_ACTIVATION_TIMEOUT=#{timeout}"
+    updated_config << "SECURITY_UNLOCK_TIMEOUT=#{timeout}"
     updated_config << "SECURITY_EXTENDABLE=#{extendable}"
 
     # Write updated config
@@ -358,7 +358,7 @@ class GentilityAgent
         params.add "version", VERSION
         params.add "security_mode", Security.mode
         params.add "security_enabled", (Security.mode != "none").to_s
-        params.add "security_active", Security.activated?.to_s
+        params.add "security_active", Security.unlocked?.to_s
       end
     )
 
@@ -492,8 +492,8 @@ class GentilityAgent
         {"error" => "Missing capabilities parameter"}
       end
     when "execute"
-      return {"error" => "Agent activation required for command execution"} unless Security.activated?
-      Security.extend_activation
+      return {"error" => "Agent unlock required for command execution"} unless Security.unlocked?
+      Security.extend_unlock
       cmd = params.try(&.["command"]?.try(&.to_s))
       if cmd
         execute_shell_command(cmd)
@@ -516,8 +516,8 @@ class GentilityAgent
         {"error" => "Missing path or content parameter"}
       end
     when "psql_query"
-      return {"error" => "Agent activation required for database queries"} unless Security.activated?
-      Security.extend_activation
+      return {"error" => "Agent unlock required for database queries"} unless Security.unlocked?
+      Security.extend_unlock
       host = params.try(&.["host"]?.try(&.to_s))
       port = params.try(&.["port"]?.try(&.as_i?))
       dbname = params.try(&.["dbname"]?.try(&.to_s))
@@ -531,8 +531,8 @@ class GentilityAgent
         {"error" => "Missing required parameters: host, port, dbname, query"}
       end
     when "mysql_query"
-      return {"error" => "Agent activation required for database queries"} unless Security.activated?
-      Security.extend_activation
+      return {"error" => "Agent unlock required for database queries"} unless Security.unlocked?
+      Security.extend_unlock
       host = params.try(&.["host"]?.try(&.to_s))
       port = params.try(&.["port"]?.try(&.as_i?))
       dbname = params.try(&.["dbname"]?.try(&.to_s))
@@ -543,22 +543,22 @@ class GentilityAgent
       else
         {"error" => "Missing required parameters: host, port, dbname, query"}
       end
-    when "activate"
+    when "security_unlock"
       credential = params.try(&.["credential"]?.try(&.to_s))
       if credential
-        if Security.activate(credential)
+        if Security.unlock(credential)
           send_status # Send updated security status
-          {"success" => true, "message" => "Agent activated successfully"}
+          {"success" => true, "message" => "Agent unlocked successfully"}
         else
           {"error" => "Invalid credentials"}
         end
       else
         {"error" => "Missing credential parameter"}
       end
-    when "lock"
-      Security.deactivate
+    when "security_lock"
+      Security.lock
       send_status # Send updated security status
-      {"success" => true, "message" => "Agent deactivated"}
+      {"success" => true, "message" => "Agent locked"}
     when "export_security"
       credential = params.try(&.["credential"]?.try(&.to_s))
       if credential && Security.validate_promiscuous_auth(credential)
@@ -566,9 +566,9 @@ class GentilityAgent
       else
         {"error" => Security.promiscuous_enabled? ? "Invalid promiscuous credentials" : "Promiscuous mode disabled"}
       end
-    when "configure_security"
-      # Only allow configuration if no security is currently set, or if already activated
-      if Security.mode == "none" || Security.activated?
+    when "security_set"
+      # Only allow configuration if no security is currently set, or if already unlocked
+      if Security.mode == "none" || Security.unlocked?
         mode = params.try(&.["mode"]?.try(&.to_s))
         password = params.try(&.["password"]?.try(&.to_s))
         totp_secret = params.try(&.["totp_secret"]?.try(&.to_s))
@@ -584,7 +584,17 @@ class GentilityAgent
           {"error" => "Invalid security configuration parameters"}
         end
       else
-        {"error" => "Agent activation required to change security settings"}
+        {"error" => "Agent unlock required to change security settings"}
+      end
+    when "security_unset"
+      # Only allow unsetting if no security is currently set, or if already unlocked
+      if Security.mode == "none" || Security.unlocked?
+        Security.configure("none", nil, nil, 1800, true)
+        save_security_config("none", nil, nil, 1800, true)
+        send_status # Send updated security status
+        {"success" => true, "message" => "Security disabled"}
+      else
+        {"error" => "Agent unlock required to change security settings"}
       end
     when "get_status"
       # Send current status and return success
@@ -649,10 +659,11 @@ class GentilityAgent
       "file_write",
       "psql_query",
       "mysql_query",
-      "activate",
-      "lock",
+      "security_unlock",
+      "security_lock",
       "export_security",
-      "configure_security",
+      "security_set",
+      "security_unset",
       "get_status",
     ]
   end
@@ -1155,7 +1166,7 @@ def setup_config(token : String)
     # OPTIONAL: Debug logging (uncomment to enable)
     #DEBUG=false
 
-    # SECURITY: Agent activation settings
+    # SECURITY: Agent unlock settings
     # OPTIONAL: Security mode (default: none)
     # Options: none, password, totp
     #SECURITY_MODE=none
@@ -1167,9 +1178,9 @@ def setup_config(token : String)
     #SECURITY_TOTP_SECRET=JBSWY3DPEHPK3PXP
 
     # OPTIONAL: Activation timeout in seconds (default: 1800 = 30 minutes)
-    #SECURITY_ACTIVATION_TIMEOUT=1800
+    #SECURITY_UNLOCK_TIMEOUT=1800
 
-    # OPTIONAL: Extendable activation (default: true)
+    # OPTIONAL: Extendable unlock (default: true)
     #SECURITY_EXTENDABLE=true
 
     # PROMISCUOUS MODE: Allow server to export security config

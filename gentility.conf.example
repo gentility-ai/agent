@@ -36,11 +36,11 @@ GENTILITY_TOKEN=your_token_here
 # Base32 encoded TOTP secret for two-factor authentication
 #SECURITY_TOTP_SECRET=JBSWY3DPEHPK3PXP
 
-# OPTIONAL: Activation timeout in seconds (default: 1800 = 30 minutes)
-# How long the agent stays active after authentication
-#SECURITY_ACTIVATION_TIMEOUT=1800
+# OPTIONAL: Unlock timeout in seconds (default: 1800 = 30 minutes)
+# How long the agent stays unlocked after authentication
+#SECURITY_UNLOCK_TIMEOUT=1800
 
-# OPTIONAL: Extendable activation (default: true)
+# OPTIONAL: Extendable unlock (default: true)
 # If true: each sensitive command resets the timeout (rolling window)
 # If false: hard cutoff after timeout regardless of activity
 #SECURITY_EXTENDABLE=true

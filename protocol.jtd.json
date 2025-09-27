@@ -162,16 +162,16 @@
           },
           "required": ["host", "port", "dbname", "query"]
         },
-        "activate": {
+        "security_unlock": {
           "properties": {
-            "command_type": { "enum": ["activate"] },
+            "command_type": { "enum": ["security_unlock"] },
             "credential": { "type": "string" }
           },
           "required": ["credential"]
         },
-        "lock": {
+        "security_lock": {
           "properties": {
-            "command_type": { "enum": ["lock"] }
+            "command_type": { "enum": ["security_lock"] }
           }
         },
         "export_security": {
@@ -181,9 +181,9 @@
           },
           "required": ["credential"]
         },
-        "configure_security": {
+        "security_set": {
           "properties": {
-            "command_type": { "enum": ["configure_security"] },
+            "command_type": { "enum": ["security_set"] },
             "mode": { "enum": ["none", "password", "totp"] },
             "password": { "type": "string" },
             "totp_secret": { "type": "string" },
@@ -191,6 +191,11 @@
             "extendable": { "type": "boolean" }
           },
           "required": ["mode"]
+        },
+        "security_unset": {
+          "properties": {
+            "command_type": { "enum": ["security_unset"] }
+          }
         }
       }
     },

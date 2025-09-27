@@ -177,7 +177,7 @@ DEBUG="false"                        # Enable debug logging
 SECURITY_MODE="none"                 # Security mode: none, password, totp
 SECURITY_PASSWORD="mypassword"       # Password for password mode
 SECURITY_TOTP_SECRET="ABC123..."     # TOTP secret for TOTP mode
-SECURITY_ACTIVATION_TIMEOUT="1800"   # Security timeout in seconds (30 minutes)
+SECURITY_UNLOCK_TIMEOUT="1800"   # Security timeout in seconds (30 minutes)
 SECURITY_EXTENDABLE="true"           # Allow extending security sessions
 
 # Promiscuous mode (allows config sharing)
@@ -372,9 +372,9 @@ gentility run
 
 ### Security Features
 
-- **Activation timeout**: Security sessions expire after 30 minutes by default
+- **Unlock timeout**: Security sessions expire after 30 minutes by default
 - **Extendable sessions**: Each command execution extends the security session
-- **Hard timeout**: Sessions have an absolute maximum duration from first activation
+- **Hard timeout**: Sessions have an absolute maximum duration from first unlock
 - **Multiple auth modes**: Support for both TOTP and password authentication
 - **Secure storage**: All security settings are stored with 600 permissions in `/etc/gentility.conf`
 - **QR code generation**: TOTP setup includes ASCII QR codes for easy authenticator app configuration

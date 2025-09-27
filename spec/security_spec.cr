@@ -24,11 +24,11 @@ describe Security do
     end
   end
 
-  describe ".activated?" do
+  describe ".unlocked?" do
     context "when security mode is none" do
       it "always returns true" do
         Security.configure("none", nil, nil, 1800, true)
-        Security.activated?.should be_true
+        Security.unlocked?.should be_true
       end
     end
 
@@ -37,18 +37,18 @@ describe Security do
         Security.configure("password", "testpass", nil, 1800, true)
       end
 
-      it "returns false when not activated" do
-        Security.activated?.should be_false
+      it "returns false when not unlocked" do
+        Security.unlocked?.should be_false
       end
 
-      it "returns true after successful activation" do
-        Security.activate("testpass").should be_true
-        Security.activated?.should be_true
+      it "returns true after successful unlock" do
+        Security.unlock("testpass").should be_true
+        Security.unlocked?.should be_true
       end
 
-      it "returns false after invalid activation attempt" do
-        Security.activate("wrongpass").should be_false
-        Security.activated?.should be_false
+      it "returns false after invalid unlock attempt" do
+        Security.unlock("wrongpass").should be_false
+        Security.unlocked?.should be_false
       end
     end
 
@@ -58,19 +58,19 @@ describe Security do
         Security.configure("totp", nil, secret, 1800, true)
       end
 
-      it "returns false when not activated" do
-        Security.activated?.should be_false
+      it "returns false when not unlocked" do
+        Security.unlocked?.should be_false
       end
 
-      it "returns true after successful TOTP activation" do
+      it "returns true after successful TOTP unlock" do
         valid_code = generate_valid_totp_code(generate_test_totp_secret)
-        Security.activate(valid_code).should be_true
-        Security.activated?.should be_true
+        Security.unlock(valid_code).should be_true
+        Security.unlocked?.should be_true
       end
 
       it "returns false with invalid TOTP code" do
-        Security.activate("123456").should be_false
-        Security.activated?.should be_false
+        Security.unlock("123456").should be_false
+        Security.unlocked?.should be_false
       end
     end
   end
@@ -78,30 +78,30 @@ describe Security do
   describe ".activate" do
     it "activates with correct password" do
       Security.configure("password", "secret123", nil, 1800, true)
-      Security.activate("secret123").should be_true
+      Security.unlock("secret123").should be_true
     end
 
     it "fails with incorrect password" do
       Security.configure("password", "secret123", nil, 1800, true)
-      Security.activate("wrongpassword").should be_false
+      Security.unlock("wrongpassword").should be_false
     end
 
     it "activates with valid TOTP code" do
       secret = generate_test_totp_secret
       Security.configure("totp", nil, secret, 1800, true)
       valid_code = generate_valid_totp_code(secret)
-      Security.activate(valid_code).should be_true
+      Security.unlock(valid_code).should be_true
     end
   end
 
   describe ".deactivate" do
-    it "deactivates security" do
+    it "locks security" do
       Security.configure("password", "testpass", nil, 1800, true)
-      Security.activate("testpass")
-      Security.activated?.should be_true
+      Security.unlock("testpass")
+      Security.unlocked?.should be_true
       
-      Security.deactivate
-      Security.activated?.should be_false
+      Security.lock
+      Security.unlocked?.should be_false
     end
   end
 
@@ -111,14 +111,14 @@ describe Security do
       Security.time_remaining.should eq -1
     end
 
-    it "returns 0 when not activated" do
+    it "returns 0 when not unlocked" do
       Security.configure("password", "testpass", nil, 1800, true)
       Security.time_remaining.should eq 0
     end
 
-    it "returns positive value when activated" do
+    it "returns positive value when unlocked" do
       Security.configure("password", "testpass", nil, 1800, true)
-      Security.activate("testpass")
+      Security.unlock("testpass")
       Security.time_remaining.should be > 0
     end
   end
