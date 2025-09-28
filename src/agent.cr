@@ -1565,6 +1565,10 @@ def show_status
   puts "   gentility help          Show help"
 end
 
+def show_version
+  puts "Gentility AI Agent v#{VERSION}"
+end
+
 def show_help
   puts "Gentility AI Agent v#{VERSION}"
   puts "==================#{("=" * VERSION.size)}"
@@ -1579,7 +1583,8 @@ def show_help
   puts "    security <mode>      Configure security settings"
   puts "    test-totp <code>     Test TOTP validation"
   puts "    promiscuous <action> Configure promiscuous mode"
-  puts "    help, --help         Show this help message"
+  puts "    version, -v, --version  Show version information"
+  puts "    help, -h, --help     Show this help message"
   puts ""
   puts "RUN OPTIONS:"
   puts "    --token=<token>      Access token (required for run command)"
@@ -1597,10 +1602,20 @@ def show_help
   puts "    auth <password|totp> Set auth mode for promiscuous operations"
   puts ""
   puts "EXAMPLES:"
+  puts "    # Initial setup"
   puts "    gentility setup gnt_1234567890abcdef"
+  puts "    "
+  puts "    # Configure security"
   puts "    gentility security totp"
+  puts "    gentility security password mypass"
+  puts "    "
+  puts "    # Run agent"
   puts "    gentility run --token=gnt_1234567890abcdef"
-  puts "    gentility start --token=gnt_1234567890abcdef --debug"
+  puts "    gentility start --debug"
+  puts "    "
+  puts "    # Check status"
+  puts "    gentility status"
+  puts "    gentility version"
   puts ""
   puts "CONFIGURATION:"
   puts "    Config file: #{get_config_path}"
@@ -1612,6 +1627,12 @@ def main
   # Show help if no arguments or help requested
   if ARGV.empty? || ARGV[0].in?(["help", "--help", "-h"])
     show_help
+    exit 0
+  end
+
+  # Show version if version requested
+  if ARGV[0].in?(["version", "--version", "-v"])
+    show_version
     exit 0
   end
 
@@ -1702,8 +1723,8 @@ def main
     else
       puts "Unknown command: #{ARGV[0]}"
       puts ""
-      puts "Available commands: run, start, status, setup, security, test-totp, promiscuous, help"
-      puts "For detailed help: gentility help"
+      puts "Available commands: run, start, status, setup, security, test-totp, promiscuous, version, help"
+      puts "For detailed help: gentility help or gentility -h"
       exit 1
     end
   end
