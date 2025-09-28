@@ -1336,7 +1336,7 @@ def setup_security(mode : String, value : String? = nil)
   puts "✅ Security configuration saved to #{config_file}"
   puts ""
   puts "Restart the agent to apply new security settings:"
-  puts "  sudo systemctl restart gentility-agent"
+  puts "  sudo systemctl restart gentility"
 
   exit 0
 rescue ex : Exception
@@ -1444,7 +1444,7 @@ def set_promiscuous_mode(enabled : Bool)
   puts "Promiscuous mode is now #{enabled ? "enabled" : "disabled"}."
   puts ""
   puts "Restart the agent to apply changes:"
-  puts "  sudo systemctl restart gentility-agent"
+  puts "  sudo systemctl restart gentility"
 
   exit 0
 rescue ex : Exception
@@ -1470,7 +1470,7 @@ def set_promiscuous_auth_mode(mode : String)
   puts "promiscuous operations (uses the same password/TOTP as normal security)."
   puts ""
   puts "Restart the agent to apply changes:"
-  puts "  sudo systemctl restart gentility-agent"
+  puts "  sudo systemctl restart gentility"
 
   exit 0
 rescue ex : Exception
@@ -1644,7 +1644,17 @@ def main
     else
       puts "Usage: #{PROGRAM_NAME} setup <token>"
       puts ""
-      puts "Example: #{PROGRAM_NAME} setup gnt_1234567890abcdef"
+      puts "Initializes the agent with your Gentility AI access token and creates"
+      puts "the configuration file at #{get_config_path}"
+      puts ""
+      puts "Arguments:"
+      puts "  <token>    Your Gentility AI access token (starts with 'gnt_')"
+      puts ""
+      puts "Example:"
+      puts "  #{PROGRAM_NAME} setup gnt_1234567890abcdef"
+      puts ""
+      puts "After setup, start the service with:"
+      puts "  sudo systemctl start gentility"
       exit 1
     end
   end

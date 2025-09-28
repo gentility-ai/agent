@@ -110,11 +110,11 @@ Start the service:
 
 ```bash
 # Start and enable the service
-sudo systemctl start gentility-agent
-sudo systemctl enable gentility-agent
+sudo systemctl start gentility
+sudo systemctl enable gentility
 
 # Check status
-sudo systemctl status gentility-agent
+sudo systemctl status gentility
 
 # View real-time logs
 sudo journalctl -u gentility-agent -f
