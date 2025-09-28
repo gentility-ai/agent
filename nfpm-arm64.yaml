@@ -5,7 +5,7 @@
 name: "gentility-agent"
 arch: "arm64"
 platform: "linux"
-version: "1.0.33"
+version: "1.0.34"
 section: "net"
 priority: "optional"
 maintainer: "James Tippett - Gentility AI <james@gentility.ai>"
