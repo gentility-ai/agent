@@ -559,7 +559,7 @@ class GentilityAgent
       Security.lock
       send_status # Send updated security status
       {"success" => true, "message" => "Agent locked"}
-    when "export_security"
+    when "security_export"
       credential = params.try(&.["credential"]?.try(&.to_s))
       if credential && Security.validate_promiscuous_auth(credential)
         Security.export_config
@@ -661,7 +661,7 @@ class GentilityAgent
       "mysql_query",
       "security_unlock",
       "security_lock",
-      "export_security",
+      "security_export",
       "security_set",
       "security_unset",
       "get_status",

@@ -174,9 +174,9 @@
             "command_type": { "enum": ["security_lock"] }
           }
         },
-        "export_security": {
+        "security_export": {
           "properties": {
-            "command_type": { "enum": ["export_security"] },
+            "command_type": { "enum": ["security_export"] },
             "credential": { "type": "string" }
           },
           "required": ["credential"]
