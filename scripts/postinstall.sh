@@ -18,7 +18,7 @@ fi
 
 # Reload systemd and enable the service
 systemctl daemon-reload
-systemctl enable gentility-agent
+systemctl enable gentility
 
 echo ""
 echo "Gentility AI Agent has been installed successfully!"
@@ -29,9 +29,9 @@ echo "  2. Edit the config file: sudo nano /etc/gentility.conf"
 echo "  3. Set your GENTILITY_TOKEN in the config file"
 echo ""
 echo "Then start the service:"
-echo "  sudo systemctl start gentility-agent"
-echo "  sudo systemctl status gentility-agent"
+echo "  sudo systemctl start gentility"
+echo "  sudo systemctl status gentility"
 echo ""
 echo "View logs:"
-echo "  sudo journalctl -u gentility-agent -f"
+echo "  sudo journalctl -u gentility -f"
 echo ""
