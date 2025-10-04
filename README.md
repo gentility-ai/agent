@@ -55,7 +55,16 @@ sudo dpkg -i gentility-agent_1.0.36_amd64.deb
 sudo apt-get install -f
 ```
 
-### Option 3: Build from Source
+### Option 3: Homebrew (macOS)
+
+Install via the Gentility Homebrew tap:
+
+```bash
+brew tap gentility-ai/agent
+brew install gentility-agent
+```
+
+### Option 4: Build from Source
 
 Build and install from the official source code:
 

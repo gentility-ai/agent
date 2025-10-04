@@ -59,3 +59,5 @@ target/
 
 # Homebrew tap (symlinked directory)
 homebrew-agent/
+
+notes/
