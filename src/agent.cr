@@ -28,6 +28,7 @@ require "process"
 require "file"
 require "crotp"
 require "qr-code"
+require "./oauth"
 require "yaml"
 require "ed25519"
 require "base58"
@@ -1219,7 +1220,7 @@ end
 def parse_arguments
   # 1. Start with defaults
   access_key = nil
-  server_url = "wss://core.gentility.ai"
+  server_url = nil # Will be set based on environment
   nickname = `hostname`.strip
   environment = "prod"
   debug = false
@@ -1275,17 +1276,30 @@ def parse_arguments
   end
 
   # 4. Override with CLI arguments (highest priority)
-  # Check for --token and --debug arguments
-  ARGV.each_with_index do |arg, index|
+  # Check for --token, --debug, and --env arguments
+  i = 0
+  while i < ARGV.size
+    arg = ARGV[i]
     if arg.starts_with?("--token=")
       access_key = arg.split("=", 2)[1]
+      i += 1
     elsif arg == "--debug"
       debug = true
+      i += 1
+    elsif arg == "-e" || arg == "--env"
+      if i + 1 < ARGV.size
+        environment = ARGV[i + 1]
+        i += 2
+      else
+        i += 1
+      end
+    else
+      i += 1
     end
   end
 
   # Check for legacy positional arguments (backward compatibility)
-  non_token_args = ARGV.reject { |arg| arg.starts_with?("--token=") || arg == "--debug" }
+  non_token_args = ARGV.reject { |arg| arg.starts_with?("--token=") || arg == "--debug" || arg == "-e" || arg == "--env" || (ARGV.index(arg).try { |idx| idx > 0 && (ARGV[idx - 1] == "-e" || ARGV[idx - 1] == "--env") }) }
 
   if non_token_args.size > 0 && !ARGV.any? { |arg| arg.starts_with?("--token=") }
     access_key = non_token_args[0]
@@ -1306,15 +1320,28 @@ def parse_arguments
   unless access_key
     puts "ERROR: No access token provided!"
     puts ""
-    puts "To start the agent, use the run command with a token:"
+    puts "To start the agent, authenticate with OAuth:"
+    puts "  gentility auth"
+    puts ""
+    puts "Or use the run command with a token:"
     puts "  gentility run --token=YOUR_TOKEN_HERE"
     puts ""
     puts "Or configure it permanently first:"
-    puts "  sudo gentility setup YOUR_TOKEN_HERE"
+    puts "  gentility setup YOUR_TOKEN_HERE"
     puts "  gentility run"
     puts ""
     puts "For help: gentility help"
     exit 1
+  end
+
+  # Set server_url based on environment if not explicitly configured
+  unless server_url
+    server_url = case environment
+                 when "dev", "development"
+                   "https://termite-lasting-lively.ngrok-free.app"
+                 else
+                   "https://core.gentility.ai"
+                 end
   end
 
   {access_key, server_url, nickname, environment, debug}
@@ -1606,6 +1633,53 @@ def remove_config(config_file : String, keys : Array(String))
   File.chmod(config_file, 0o600)
 end
 
+def save_oauth_tokens(tokens : OAuth::TokenResponse, environment : String)
+  config_file = get_config_path
+
+  puts "💾 Saving OAuth tokens to #{config_file}..."
+
+  # Update tokens in config
+  update_config(config_file, "GENTILITY_TOKEN", tokens.access_token)
+
+  if refresh_token = tokens.refresh_token
+    update_config(config_file, "OAUTH_REFRESH_TOKEN", refresh_token)
+  end
+
+  if expires_in = tokens.expires_in
+    expiry_time = Time.utc + expires_in.seconds
+    update_config(config_file, "OAUTH_TOKEN_EXPIRY", expiry_time.to_unix.to_s)
+  end
+
+  # Save the environment for future token refreshes
+  update_config(config_file, "ENVIRONMENT", environment)
+
+  puts "✅ OAuth tokens saved successfully!"
+  puts ""
+  puts "You can now start the agent with:"
+  puts "  gentility run"
+  puts "  # Or as a service:"
+  puts "  brew services start gentility-agent  # macOS"
+  puts "  sudo systemctl start gentility        # Linux"
+rescue ex : Exception
+  puts "❌ Error saving OAuth tokens: #{ex.message}"
+  exit 1
+end
+
+def run_oauth_flow(environment : String, headless : Bool)
+  puts "🔐 Starting OAuth authentication flow..."
+  puts "Environment: #{environment}"
+  puts ""
+
+  begin
+    tokens = OAuth::Flow.authenticate(environment, headless)
+    save_oauth_tokens(tokens, environment)
+  rescue ex : Exception
+    puts ""
+    puts "❌ OAuth authentication failed: #{ex.message}"
+    exit 1
+  end
+end
+
 def test_totp_validation(code : String)
   config_file = get_config_path
   config = load_config_from_file(config_file) || {} of String => String
@@ -1825,6 +1899,7 @@ def show_help
   puts "    gentility <COMMAND> [OPTIONS]"
   puts ""
   puts "COMMANDS:"
+  puts "    auth                 Authenticate via your web browser"
   puts "    run, start           Start the agent daemon"
   puts "    status               Show agent configuration and service status"
   puts "    generate             Generate a new Ed25519 keypair"
@@ -1835,9 +1910,14 @@ def show_help
   puts "    version, -v, --version  Show version information"
   puts "    help, -h, --help     Show this help message"
   puts ""
+  puts "AUTH OPTIONS:"
+  puts "    -e, --env <env>      Environment: prod (default) or dev"
+  puts "    --headless           Don't auto-open browser (display URL only)"
+  puts ""
   puts "RUN OPTIONS:"
   puts "    --token=<token>      Access token (required for run command)"
   puts "    --debug              Enable debug logging"
+  puts "    -e, --env <env>      Environment: prod (default) or dev"
   puts ""
   puts "SECURITY MODES:"
   puts "    totp [secret]        Enable TOTP authentication"
@@ -1851,10 +1931,13 @@ def show_help
   puts "    auth <password|totp> Set auth mode for promiscuous operations"
   puts ""
   puts "EXAMPLES:"
-  puts "    # Generate new keypair"
-  puts "    gentility generate"
+  puts "    # Authenticate with OAuth (recommended)"
+  puts "    gentility auth"
+  puts "    gentility auth -e dev"
+  puts "    gentility auth --headless"
   puts "    "
-  puts "    # Initial setup"
+  puts "    # Or generate keypair and setup manually"
+  puts "    gentility generate"
   puts "    gentility setup <generated_private_key>"
   puts "    "
   puts "    # Configure security"
@@ -1862,8 +1945,8 @@ def show_help
   puts "    gentility security password mypass"
   puts "    "
   puts "    # Run agent"
-  puts "    gentility run --token=<your_private_key>"
-  puts "    gentility start --debug"
+  puts "    gentility run"
+  puts "    gentility run -e dev --debug"
   puts "    "
   puts "    # Check status"
   puts "    gentility status"
@@ -1915,6 +1998,37 @@ def main
       puts "  sudo systemctl start gentility"
       exit 1
     end
+  end
+
+  # Check for auth command
+  if ARGV[0] == "auth"
+    environment = "prod"
+    headless = false
+
+    # Parse auth options
+    i = 1
+    while i < ARGV.size
+      case ARGV[i]
+      when "-e", "--env"
+        if i + 1 < ARGV.size
+          environment = ARGV[i + 1]
+          i += 2
+        else
+          puts "Error: -e/--env requires an argument"
+          exit 1
+        end
+      when "--headless"
+        headless = true
+        i += 1
+      else
+        puts "Unknown option: #{ARGV[i]}"
+        puts "Usage: gentility auth [-e <env>] [--headless]"
+        exit 1
+      end
+    end
+
+    run_oauth_flow(environment, headless)
+    exit 0
   end
 
   # Check for security setup commands
