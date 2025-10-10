@@ -9,7 +9,7 @@ RestartSec=5
 User=gentility
 WorkingDirectory=/var/lib/gentility-agent
 Environment=PATH=/usr/local/bin:/usr/bin:/bin
-EnvironmentFile=-/etc/gentility.conf
+EnvironmentFile=-/etc/gentility.yaml
 
 [Install]
 WantedBy=multi-user.target

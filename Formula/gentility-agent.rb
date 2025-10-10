@@ -27,7 +27,7 @@ class GentilityAgent < Formula
     bin.install "gentility"
 
     # Install configuration example
-    etc.install "gentility.conf.example"
+    etc.install "gentility.yaml.example"
   end
 
   def caveats
@@ -35,7 +35,7 @@ class GentilityAgent < Formula
       Quick Setup:
         gentility setup YOUR_TOKEN_HERE
 
-      This will create #{etc}/gentility.conf with your token.
+      This will create #{etc}/gentility.yaml with your token.
 
       Then start as a service:
         brew services start gentility-agent
@@ -49,7 +49,7 @@ class GentilityAgent < Formula
 
   service do
     run [opt_bin/"gentility", "run"]
-    environment_variables GENTILITY_CONFIG: etc/"gentility.conf"
+    environment_variables GENTILITY_CONFIG: etc/"gentility.yaml"
     run_type :immediate
     keep_alive true
     log_path var/"log/gentility-agent/stdout.log"

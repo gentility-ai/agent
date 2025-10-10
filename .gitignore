@@ -21,6 +21,7 @@ credentials*
 
 !*.conf.example
 !gentility-agent.conf.example
+!gentility-agent.yaml.example
 
 # Build artifacts
 /packages/

@@ -1,6 +1,6 @@
 # MIT License
 #
-# Copyright (c) 2025 James Tippett & Gentility AI
+# Copyright (c) 2025 Gentility AI
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -28,6 +28,12 @@ require "process"
 require "file"
 require "crotp"
 require "qr-code"
+require "yaml"
+require "ed25519"
+require "base58"
+require "crypto/subtle"
+require "openssl/cipher"
+require "base64"
 
 # Read version from VERSION file at compile time
 VERSION = {{ read_file("VERSION").strip }}
@@ -188,6 +194,133 @@ module Security
   end
 end
 
+# Cryptographic utilities for Ed25519 keypairs and credential encryption
+module AgentCrypto
+  # Parse an Ed25519 private key from base58 string and return signing key
+  def self.parse_private_key(base58_key : String) : Ed25519::SigningKey
+    key_bytes = Base58.decode(base58_key).to_slice
+
+    # Validate key length before creating SigningKey
+    if key_bytes.size != 32
+      raise Ed25519::VerifyError.new("Expected 32 bytes. Key is only #{key_bytes.size} bytes")
+    end
+
+    Ed25519::SigningKey.new(key_bytes)
+  end
+
+  # Get public key from private key as base58 string
+  def self.public_key_base58(signing_key : Ed25519::SigningKey) : String
+    verify_key = signing_key.verify_key
+    Base58.encode(verify_key.key_bytes)
+  end
+
+  # Derive AES-256 key from Ed25519 private key
+  # Uses first 32 bytes of the signing key as AES key
+  def self.derive_aes_key(signing_key : Ed25519::SigningKey) : Bytes
+    # Ed25519 private key is 32 bytes, perfect for AES-256
+    signing_key.key_bytes
+  end
+
+  # Encrypt data with AES-256-CBC using the signing key
+  def self.encrypt(signing_key : Ed25519::SigningKey, plaintext : String) : String
+    aes_key = derive_aes_key(signing_key)
+
+    # Generate random IV
+    iv = Random::Secure.random_bytes(16)
+
+    # Create cipher
+    cipher = OpenSSL::Cipher.new("AES-256-CBC")
+    cipher.encrypt
+    cipher.key = aes_key
+    cipher.iv = iv
+
+    # Encrypt
+    encrypted = IO::Memory.new
+    encrypted.write(iv) # Prepend IV to ciphertext
+    encrypted.write(cipher.update(plaintext))
+    encrypted.write(cipher.final)
+
+    # Return base64 encoded result
+    Base64.strict_encode(encrypted.to_slice)
+  end
+
+  # Decrypt data with AES-256-CBC using the signing key
+  def self.decrypt(signing_key : Ed25519::SigningKey, ciphertext_b64 : String) : String
+    aes_key = derive_aes_key(signing_key)
+
+    # Decode base64
+    ciphertext = Base64.decode(ciphertext_b64)
+
+    # Extract IV (first 16 bytes)
+    iv = ciphertext[0, 16]
+    encrypted_data = ciphertext[16..-1]
+
+    # Create cipher
+    cipher = OpenSSL::Cipher.new("AES-256-CBC")
+    cipher.decrypt
+    cipher.key = aes_key
+    cipher.iv = iv
+
+    # Decrypt
+    decrypted = IO::Memory.new
+    decrypted.write(cipher.update(encrypted_data))
+    decrypted.write(cipher.final)
+
+    String.new(decrypted.to_slice)
+  end
+
+  # Store encrypted credentials in config file
+  def self.store_credentials(config_file : String, db_target_id : String, credentials : String, signing_key : Ed25519::SigningKey)
+    # Encrypt credentials
+    encrypted = encrypt(signing_key, credentials)
+
+    # Load config
+    config = if File.exists?(config_file)
+               YAML.parse(File.read(config_file))
+             else
+               YAML.parse("{}")
+             end
+
+    config_hash = config.as_h? || {} of YAML::Any => YAML::Any
+
+    # Get or create encrypted_db_credentials section
+    creds_section = if existing = config_hash[YAML::Any.new("encrypted_db_credentials")]?
+                      existing.as_h? || {} of YAML::Any => YAML::Any
+                    else
+                      {} of YAML::Any => YAML::Any
+                    end
+
+    # Store encrypted credentials
+    creds_section[YAML::Any.new(db_target_id)] = YAML::Any.new(encrypted)
+    config_hash[YAML::Any.new("encrypted_db_credentials")] = YAML::Any.new(creds_section)
+
+    # Write back to file
+    File.write(config_file, config_hash.to_yaml)
+    File.chmod(config_file, 0o600)
+  end
+
+  # Load and decrypt credentials from config file
+  def self.load_credentials(config_file : String, db_target_id : String, signing_key : Ed25519::SigningKey) : String?
+    return nil unless File.exists?(config_file)
+
+    config = YAML.parse(File.read(config_file))
+    config_hash = config.as_h? || {} of YAML::Any => YAML::Any
+
+    creds_section = config_hash[YAML::Any.new("encrypted_db_credentials")]?
+    return nil unless creds_section
+
+    creds_hash = creds_section.as_h? || {} of YAML::Any => YAML::Any
+    encrypted = creds_hash[YAML::Any.new(db_target_id)]?
+    return nil unless encrypted
+
+    encrypted_str = encrypted.as_s? || return nil
+    decrypt(signing_key, encrypted_str)
+  rescue ex
+    puts "Warning: Failed to load credentials for #{db_target_id}: #{ex.message}"
+    nil
+  end
+end
+
 class GentilityAgent
   @websocket : HTTP::WebSocket?
   @access_key : String
@@ -197,24 +330,76 @@ class GentilityAgent
   @running : Bool = false
   @ping_fiber : Fiber?
   @debug : Bool = false
+  @signing_key : Ed25519::SigningKey
+  @public_key : String
 
   def initialize(@access_key : String, @server_url : String, @nickname : String, @environment : String = "prod", @debug : Bool = false)
+    # Parse Ed25519 private key from access_key
+    @signing_key = parse_and_validate_key(@access_key)
+    @public_key = AgentCrypto.public_key_base58(@signing_key)
+
+    puts "Agent Public Key: #{@public_key}" if @debug
+
     load_security_config
+  end
+
+  private def parse_and_validate_key(access_key : String) : Ed25519::SigningKey
+    AgentCrypto.parse_private_key(access_key)
+  rescue ex : Ed25519::VerifyError
+    puts "❌ Error: Invalid access key format"
+    puts ""
+    puts "The provided access key is not a valid Ed25519 private key."
+    puts "Ed25519 keys must be exactly 32 bytes when decoded from base58."
+    puts ""
+    puts "Please check that you copied the full key from the Gentility dashboard."
+    exit 1
+  rescue ex : Exception
+    puts "❌ Error parsing access key: #{ex.message}"
+    exit 1
   end
 
   private def load_security_config
     config_file = get_config_path
-    config = load_config_from_file(config_file) || {} of String => String
+    config = load_config_from_file(config_file)
+    return Security.configure("none", nil, nil, 1800, true, true, "password") unless config
 
-    mode = config["SECURITY_MODE"]? || "none"
-    password = config["SECURITY_PASSWORD"]?
-    totp_secret = config["SECURITY_TOTP_SECRET"]?
-    timeout = config["SECURITY_UNLOCK_TIMEOUT"]?.try(&.to_i?) || 1800
-    extendable = parse_boolean(config["SECURITY_EXTENDABLE"]?, true)
-    promiscuous_enabled = parse_boolean(config["PROMISCUOUS_ENABLED"]?, true)
-    promiscuous_auth_mode = config["PROMISCUOUS_AUTH_MODE"]? || "password"
+    # Support both YAML security section and legacy flat keys
+    security_config = config["security"]? || config
+
+    mode = security_config["mode"]?.try(&.as_s?) ||
+           security_config["SECURITY_MODE"]?.try(&.as_s?) || "none"
+
+    password = security_config["password"]?.try(&.as_s?) ||
+               security_config["SECURITY_PASSWORD"]?.try(&.as_s?)
+
+    totp_secret = security_config["totp_secret"]?.try(&.as_s?) ||
+                  security_config["SECURITY_TOTP_SECRET"]?.try(&.as_s?)
+
+    timeout = security_config["unlock_timeout"]?.try(&.as_i?) ||
+              security_config["SECURITY_UNLOCK_TIMEOUT"]?.try(&.as_i?) || 1800
+
+    extendable = security_config["extendable"]?.try(&.as_bool?) ||
+                 security_config["SECURITY_EXTENDABLE"]?.try { |v| parse_boolean_from_any(v) } ||
+                 true
+
+    promiscuous_enabled = security_config["promiscuous_enabled"]?.try(&.as_bool?) ||
+                          security_config["PROMISCUOUS_ENABLED"]?.try { |v| parse_boolean_from_any(v) } ||
+                          true
+
+    promiscuous_auth_mode = security_config["promiscuous_auth_mode"]?.try(&.as_s?) ||
+                            security_config["PROMISCUOUS_AUTH_MODE"]?.try(&.as_s?) || "password"
 
     Security.configure(mode, password, totp_secret, timeout, extendable, promiscuous_enabled, promiscuous_auth_mode)
+  end
+
+  private def parse_boolean_from_any(value : YAML::Any) : Bool
+    if bool_val = value.as_bool?
+      bool_val
+    elsif str_val = value.as_s?
+      parse_boolean(str_val, false)
+    else
+      false
+    end
   end
 
   private def parse_boolean(value : String?, default : Bool) : Bool
@@ -232,33 +417,28 @@ class GentilityAgent
   private def save_security_config(mode : String, password : String?, totp_secret : String?, timeout : Int32, extendable : Bool)
     config_file = get_config_path
 
-    # Read existing config
-    existing_config = [] of String
-    if File.exists?(config_file)
-      existing_config = File.read_lines(config_file)
-    end
+    # Read and parse existing YAML config
+    config = if File.exists?(config_file)
+               YAML.parse(File.read(config_file))
+             else
+               YAML.parse("{}")
+             end
 
-    # Update or add security settings
-    updated_config = [] of String
-    security_keys = ["SECURITY_MODE", "SECURITY_PASSWORD", "SECURITY_TOTP_SECRET", "SECURITY_UNLOCK_TIMEOUT", "SECURITY_EXTENDABLE"]
+    # Convert to hash for modification
+    config_hash = config.as_h? || {} of YAML::Any => YAML::Any
 
-    existing_config.each do |line|
-      # Skip existing security lines - we'll add new ones
-      next if security_keys.any? { |key| line.starts_with?("#{key}=") || line.starts_with?("##{key}=") }
-      updated_config << line
-    end
+    # Create or update security section
+    security_hash = {} of YAML::Any => YAML::Any
+    security_hash[YAML::Any.new("mode")] = YAML::Any.new(mode)
+    security_hash[YAML::Any.new("password")] = YAML::Any.new(password) if password
+    security_hash[YAML::Any.new("totp_secret")] = YAML::Any.new(totp_secret) if totp_secret
+    security_hash[YAML::Any.new("unlock_timeout")] = YAML::Any.new(timeout.to_i64)
+    security_hash[YAML::Any.new("extendable")] = YAML::Any.new(extendable)
 
-    # Add new security configuration
-    updated_config << ""
-    updated_config << "# Security configuration (updated remotely)"
-    updated_config << "SECURITY_MODE=#{mode}"
-    updated_config << "SECURITY_PASSWORD=#{password}" if password
-    updated_config << "SECURITY_TOTP_SECRET=#{totp_secret}" if totp_secret
-    updated_config << "SECURITY_UNLOCK_TIMEOUT=#{timeout}"
-    updated_config << "SECURITY_EXTENDABLE=#{extendable}"
+    config_hash[YAML::Any.new("security")] = YAML::Any.new(security_hash)
 
     # Write updated config
-    File.write(config_file, updated_config.join("\n") + "\n")
+    File.write(config_file, config_hash.to_yaml)
     File.chmod(config_file, 0o600)
   rescue ex : Exception
     puts "Warning: Could not save security configuration to file: #{ex.message}"
@@ -354,7 +534,7 @@ class GentilityAgent
       port: uri.port,
       path: "/agent/ws/websocket",
       query: URI::Params.build do |params|
-        params.add "access_key", @access_key
+        params.add "access_key", @public_key # Send public key for authentication
         params.add "version", VERSION
         params.add "security_mode", Security.mode
         params.add "security_enabled", (Security.mode != "none").to_s
@@ -543,6 +723,68 @@ class GentilityAgent
       else
         {"error" => "Missing required parameters: host, port, dbname, query"}
       end
+    when "psql_query_encrypted"
+      return {"error" => "Agent unlock required for database queries"} unless Security.unlocked?
+      Security.extend_unlock
+
+      db_target_id = params.try(&.["db_target_id"]?.try(&.to_s))
+      query = params.try(&.["query"]?.try(&.to_s))
+
+      if db_target_id && query
+        # Load credentials from encrypted storage
+        config_file = get_config_path
+        creds_json = AgentCrypto.load_credentials(config_file, db_target_id, @signing_key)
+
+        unless creds_json
+          return {"error" => "Credentials not found for db_target_id: #{db_target_id}"}
+        end
+
+        # Parse credentials JSON
+        creds = JSON.parse(creds_json)
+        host = creds["host"]?.try(&.as_s)
+        port = creds["port"]?.try(&.as_i)
+        dbname = creds["database"]?.try(&.as_s)
+        username = creds["username"]?.try(&.as_s)
+        password = creds["password"]?.try(&.as_s)
+
+        if host && port && dbname
+          execute_psql_query(host, port, dbname, query, username, password)
+        else
+          {"error" => "Invalid stored credentials"}
+        end
+      else
+        {"error" => "Missing required parameters: db_target_id, query"}
+      end
+    when "mysql_query_encrypted"
+      return {"error" => "Agent unlock required for database queries"} unless Security.unlocked?
+      Security.extend_unlock
+
+      db_target_id = params.try(&.["db_target_id"]?.try(&.to_s))
+      query = params.try(&.["query"]?.try(&.to_s))
+
+      if db_target_id && query
+        # Load credentials from encrypted storage
+        config_file = get_config_path
+        creds_json = AgentCrypto.load_credentials(config_file, db_target_id, @signing_key)
+
+        unless creds_json
+          return {"error" => "Credentials not found for db_target_id: #{db_target_id}"}
+        end
+
+        # Parse credentials JSON
+        creds = JSON.parse(creds_json)
+        host = creds["host"]?.try(&.as_s)
+        port = creds["port"]?.try(&.as_i)
+        dbname = creds["database"]?.try(&.as_s)
+
+        if host && port && dbname
+          execute_mysql_query(host, port, dbname, query)
+        else
+          {"error" => "Invalid stored credentials"}
+        end
+      else
+        {"error" => "Missing required parameters: db_target_id, query"}
+      end
     when "security_unlock"
       credential = params.try(&.["credential"]?.try(&.to_s))
       if credential
@@ -600,6 +842,22 @@ class GentilityAgent
       # Send current status and return success
       send_status
       {"success" => true, "message" => "Status update sent"}
+    when "store_credentials"
+      # Store encrypted database credentials on the agent
+      db_target_id = params.try(&.["db_target_id"]?.try(&.to_s))
+      credentials = params.try(&.["credentials"]?.try(&.to_s))
+
+      if db_target_id && credentials
+        begin
+          config_file = get_config_path
+          AgentCrypto.store_credentials(config_file, db_target_id, credentials, @signing_key)
+          {"success" => true, "message" => "Credentials stored securely"}
+        rescue ex : Exception
+          {"error" => "Failed to store credentials: #{ex.message}"}
+        end
+      else
+        {"error" => "Missing db_target_id or credentials parameter"}
+      end
     else
       {"error" => "Unknown command: #{command}"}
     end
@@ -949,22 +1207,10 @@ class GentilityAgent
 end
 
 # Configuration and argument parsing
-def load_config_from_file(path : String) : Hash(String, String)?
+def load_config_from_file(path : String) : YAML::Any?
   return nil unless File.exists?(path)
 
-  config = {} of String => String
-  File.each_line(path) do |line|
-    line = line.strip
-    next if line.empty? || line.starts_with?("#")
-
-    if match = line.match(/^(\w+)\s*=\s*(.+)$/)
-      key = match[1]
-      value = match[2].gsub(/^["']|["']$/, "") # Remove quotes
-      config[key] = value
-    end
-  end
-
-  config
+  YAML.parse(File.read(path))
 rescue ex : Exception
   puts "Error reading config file: #{ex.message}"
   nil
@@ -980,28 +1226,30 @@ def parse_arguments
 
   # 2. Load configuration from file if it exists
   config_file = get_config_path
-  config = load_config_from_file(config_file) || {} of String => String
+  config = load_config_from_file(config_file)
 
-  # Apply config file settings
-  if config["GENTILITY_TOKEN"]? || config["ACCESS_KEY"]?
-    access_key = config["GENTILITY_TOKEN"]? || config["ACCESS_KEY"]?
-  end
+  # Apply config file settings (YAML format)
+  if config
+    # Support both snake_case (YAML convention) and legacy SCREAMING_CASE
+    access_key = config["access_key"]?.try(&.as_s?) ||
+                 config["ACCESS_KEY"]?.try(&.as_s?) ||
+                 config["GENTILITY_TOKEN"]?.try(&.as_s?)
 
-  if config["SERVER_URL"]?
-    server_url = config["SERVER_URL"]
-  end
+    server_url = config["server_url"]?.try(&.as_s?) ||
+                 config["SERVER_URL"]?.try(&.as_s?) ||
+                 server_url
 
-  if config["NICKNAME"]?
-    nickname = config["NICKNAME"]
-  end
+    nickname = config["nickname"]?.try(&.as_s?) ||
+               config["NICKNAME"]?.try(&.as_s?) ||
+               nickname
 
-  if config["ENVIRONMENT"]?
-    environment = config["ENVIRONMENT"]
-  end
+    environment = config["environment"]?.try(&.as_s?) ||
+                  config["ENVIRONMENT"]?.try(&.as_s?) ||
+                  environment
 
-  if config["DEBUG"]?
-    debug_val = config["DEBUG"].downcase
-    debug = (debug_val == "true" || debug_val == "1" || debug_val == "yes")
+    debug = config["debug"]?.try(&.as_bool?) ||
+            config["DEBUG"]?.try { |v| v.as_s?.try { |s| s.downcase == "true" || s == "1" || s.downcase == "yes" } } ||
+            debug
   end
 
   # 3. Override with environment variables (systemd loads config as env vars too)
@@ -1082,14 +1330,14 @@ def get_config_path : String
   {% if flag?(:darwin) %}
     # macOS - check for Homebrew installation
     if File.exists?("/opt/homebrew/etc")
-      return "/opt/homebrew/etc/gentility.conf"
+      return "/opt/homebrew/etc/gentility.yaml"
     elsif File.exists?("/usr/local/etc")
-      return "/usr/local/etc/gentility.conf"
+      return "/usr/local/etc/gentility.yaml"
     end
   {% end %}
 
   # Default to /etc for Linux and other systems
-  "/etc/gentility.conf"
+  "/etc/gentility.yaml"
 end
 
 def setup_config(token : String)
@@ -1098,42 +1346,15 @@ def setup_config(token : String)
   # Check if config file already exists
   if File.exists?(config_file)
     puts "📝 Configuration file #{config_file} already exists."
-    puts "Updating GENTILITY_TOKEN..."
+    puts "Updating access_key..."
 
-    # Read existing config
-    content = File.read(config_file)
-    lines = content.split('\n')
-    token_updated = false
+    # Read and parse existing YAML config
+    config = YAML.parse(File.read(config_file))
+    config_hash = config.as_h? || {} of YAML::Any => YAML::Any
+    config_hash[YAML::Any.new("access_key")] = YAML::Any.new(token)
 
-    # Update or add the GENTILITY_TOKEN line
-    updated_lines = lines.map do |line|
-      # Match commented or uncommented GENTILITY_TOKEN lines
-      if line.matches?(/^\s*#?\s*GENTILITY_TOKEN\s*=/)
-        token_updated = true
-        "GENTILITY_TOKEN=#{token}"
-      else
-        line
-      end
-    end
-
-    # If no GENTILITY_TOKEN line was found, add it after the header comments
-    unless token_updated
-      # Find the first non-comment line or end of initial comments
-      insert_index = 0
-      updated_lines.each_with_index do |line, i|
-        if !line.starts_with?("#") && !line.strip.empty?
-          insert_index = i
-          break
-        end
-      end
-      updated_lines.insert(insert_index, "")
-      updated_lines.insert(insert_index + 1, "# REQUIRED: Your Gentility AI access token")
-      updated_lines.insert(insert_index + 2, "GENTILITY_TOKEN=#{token}")
-      token_updated = true
-    end
-
-    # Write updated config
-    File.write(config_file, updated_lines.join('\n'))
+    # Write updated config back
+    File.write(config_file, config_hash.to_yaml)
     puts "✅ Token updated in #{config_file}"
     puts ""
     puts "You can now start the service with:"
@@ -1146,49 +1367,53 @@ def setup_config(token : String)
 
   # Check if we have permissions to write to /etc
   begin
-    # Create full config content based on example
+    # Create full config content in YAML format
     config_content = <<-CONFIG
     # Gentility AI Agent Configuration
     # Automatically generated by gentility setup
 
-    # REQUIRED: Your Gentility AI access token
-    GENTILITY_TOKEN=#{token}
+    # REQUIRED: Your Gentility AI access token (Ed25519 private key in base58)
+    access_key: "#{token}"
 
     # OPTIONAL: Server URL (default: wss://core.gentility.ai)
-    #SERVER_URL=wss://core.gentility.ai
+    # server_url: wss://core.gentility.ai
 
     # OPTIONAL: Agent nickname (default: hostname)
-    #NICKNAME=#{`hostname`.strip}
+    # nickname: #{`hostname`.strip}
 
     # OPTIONAL: Environment (default: prod)
-    #ENVIRONMENT=prod
+    # environment: prod
 
-    # OPTIONAL: Debug logging (uncomment to enable)
-    #DEBUG=false
+    # OPTIONAL: Debug logging (default: false)
+    # debug: false
 
-    # SECURITY: Agent unlock settings
-    # OPTIONAL: Security mode (default: none)
-    # Options: none, password, totp
-    #SECURITY_MODE=none
+    # Security configuration
+    security:
+      # Security mode: none, password, or totp (default: none)
+      # mode: none
 
-    # OPTIONAL: Security password (if SECURITY_MODE=password)
-    #SECURITY_PASSWORD=your_secure_password
+      # Password for password mode
+      # password: your_secure_password
 
-    # OPTIONAL: TOTP secret (if SECURITY_MODE=totp) 
-    #SECURITY_TOTP_SECRET=JBSWY3DPEHPK3PXP
+      # TOTP secret for totp mode (base32 encoded)
+      # totp_secret: JBSWY3DPEHPK3PXP
 
-    # OPTIONAL: Activation timeout in seconds (default: 1800 = 30 minutes)
-    #SECURITY_UNLOCK_TIMEOUT=1800
+      # Unlock timeout in seconds (default: 1800 = 30 minutes)
+      # unlock_timeout: 1800
 
-    # OPTIONAL: Extendable unlock (default: true)
-    #SECURITY_EXTENDABLE=true
+      # Allow extending timeout on activity (default: true)
+      # extendable: true
 
-    # PROMISCUOUS MODE: Allow server to export security config
-    # OPTIONAL: Enable promiscuous mode (default: true)
-    #PROMISCUOUS_ENABLED=true
+      # Promiscuous mode - allow server to export security config (default: true)
+      # promiscuous_enabled: true
 
-    # OPTIONAL: Promiscuous authentication mode (default: password)
-    #PROMISCUOUS_AUTH_MODE=password
+      # Promiscuous authentication mode: password or totp (default: password)
+      # promiscuous_auth_mode: password
+
+    # Encrypted database credentials (managed by server)
+    encrypted_db_credentials:
+      # Database credentials will be stored here as:
+      # db-target-uuid: base64_encrypted_credentials
     CONFIG
 
     # Write the config file
@@ -1400,7 +1625,7 @@ def test_totp_validation(code : String)
   end
 
   begin
-    totp = CrOTP::TOTP.new(totp_secret)
+    totp = CrOTP::TOTP.new(totp_secret.as(String))
     if totp.verify(code)
       puts "✅ TOTP validation successful!"
       puts "Code '#{code}' is valid for the configured secret."
@@ -1569,6 +1794,29 @@ def show_version
   puts "Gentility AI Agent v#{VERSION}"
 end
 
+def generate_keypair
+  # Generate a new Ed25519 keypair
+  signing_key = Ed25519::SigningKey.new
+  private_key_base58 = Base58.encode(signing_key.key_bytes)
+  public_key_base58 = AgentCrypto.public_key_base58(signing_key)
+
+  puts "🔑 Generated Ed25519 Keypair"
+  puts "============================"
+  puts ""
+  puts "Private Key (base58):"
+  puts private_key_base58
+  puts ""
+  puts "Public Key (base58):"
+  puts public_key_base58
+  puts ""
+  puts "⚠️  Keep the private key secret and secure!"
+  puts "Use the private key as your access token when setting up the agent."
+  puts ""
+  puts "Next steps:"
+  puts "  gentility setup #{private_key_base58}"
+  puts ""
+end
+
 def show_help
   puts "Gentility AI Agent v#{VERSION}"
   puts "==================#{("=" * VERSION.size)}"
@@ -1579,6 +1827,7 @@ def show_help
   puts "COMMANDS:"
   puts "    run, start           Start the agent daemon"
   puts "    status               Show agent configuration and service status"
+  puts "    generate             Generate a new Ed25519 keypair"
   puts "    setup <token>        Initial setup with access token"
   puts "    security <mode>      Configure security settings"
   puts "    test-totp <code>     Test TOTP validation"
@@ -1602,15 +1851,18 @@ def show_help
   puts "    auth <password|totp> Set auth mode for promiscuous operations"
   puts ""
   puts "EXAMPLES:"
+  puts "    # Generate new keypair"
+  puts "    gentility generate"
+  puts "    "
   puts "    # Initial setup"
-  puts "    gentility setup gnt_1234567890abcdef"
+  puts "    gentility setup <generated_private_key>"
   puts "    "
   puts "    # Configure security"
   puts "    gentility security totp"
   puts "    gentility security password mypass"
   puts "    "
   puts "    # Run agent"
-  puts "    gentility run --token=gnt_1234567890abcdef"
+  puts "    gentility run --token=<your_private_key>"
   puts "    gentility start --debug"
   puts "    "
   puts "    # Check status"
@@ -1633,6 +1885,12 @@ def main
   # Show version if version requested
   if ARGV[0].in?(["version", "--version", "-v"])
     show_version
+    exit 0
+  end
+
+  # Check for generate command
+  if ARGV[0] == "generate"
+    generate_keypair
     exit 0
   end
 
@@ -1761,4 +2019,5 @@ def main
   agent.start
 end
 
-main
+# Only run main when not in spec mode
+main unless ENV["CRYSTAL_SPEC"]? == "true"

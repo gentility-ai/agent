@@ -16,3 +16,9 @@ shards:
   qr-code:
     git: https://github.com/spider-gazelle/qr-code.git
     version: 1.0.3
+  ed25519:
+    git: https://github.com/spider-gazelle/ed25519.git
+    version: 1.0.3
+  base58:
+    git: https://github.com/wyhaines/base58.cr.git
+    version: 0.2.2

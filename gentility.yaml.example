@@ -1,0 +1,53 @@
+# Gentility AI Agent Configuration
+# Copy this file to /etc/gentility.yaml and edit as needed
+
+# REQUIRED: Your Gentility AI access token (Ed25519 private key in base58)
+# Get this from your Gentility AI dashboard
+access_key: "your_token_here"
+
+# OPTIONAL: Server URL (default: wss://core.gentility.ai)
+# Use wss:// for production, ws:// for development
+# server_url: wss://core.gentility.ai
+
+# OPTIONAL: Agent nickname (default: hostname)
+# This helps identify your agent in the dashboard
+# nickname: my-server-01
+
+# OPTIONAL: Environment (default: prod)
+# Options: prod, staging, dev
+# environment: prod
+
+# OPTIONAL: Debug logging (default: false)
+# This will log all WebSocket message traffic
+# debug: false
+
+# Security configuration
+security:
+  # Security mode: none, password, or totp (default: none)
+  # mode: none
+
+  # Password for password mode
+  # password: your_secure_password
+
+  # TOTP secret for totp mode (base32 encoded)
+  # totp_secret: JBSWY3DPEHPK3PXP
+
+  # Unlock timeout in seconds (default: 1800 = 30 minutes)
+  # unlock_timeout: 1800
+
+  # Allow extending timeout on activity (default: true)
+  # extendable: true
+
+  # Promiscuous mode - allow server to export security config (default: true)
+  # promiscuous_enabled: true
+
+  # Promiscuous authentication mode: password or totp (default: password)
+  # promiscuous_auth_mode: password
+
+# Encrypted database credentials (managed by server via store_credentials command)
+# Database credentials are stored here encrypted with your agent's Ed25519 key
+# Format: db-target-uuid: base64_encrypted_credentials
+# Example:
+# encrypted_db_credentials:
+#   550e8400-e29b-41d4-a716-446655440000: "base64encodedencryptedcreds..."
+encrypted_db_credentials: {}

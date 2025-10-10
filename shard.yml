@@ -13,5 +13,11 @@ dependencies:
     github: philnash/crotp
   qr-code:
     github: spider-gazelle/qr-code
+  ed25519:
+    github: spider-gazelle/ed25519
+    version: ~> 1.0
+  base58:
+    github: wyhaines/base58.cr
+    version: ~> 0.2
 
 crystal: ">= 1.0.0"

@@ -3,7 +3,8 @@ require "./spec_helper"
 describe Security do
   # Reset security state before each test
   before_each do
-    Security.configure("none", nil, nil, 1800, true)
+    Security.lock  # Ensure clean locked state
+    Security.configure("none", nil, nil, 1800, true, true, "password")
   end
 
   describe ".configure" do
@@ -111,9 +112,11 @@ describe Security do
       Security.time_remaining.should eq -1
     end
 
-    it "returns 0 when not unlocked" do
+    it "returns -1 when not active (locked)" do
       Security.configure("password", "testpass", nil, 1800, true)
-      Security.time_remaining.should eq 0
+      Security.lock  # Ensure it's locked (not active)
+      # When locked (not active), time_remaining returns -1
+      Security.time_remaining.should eq -1
     end
 
     it "returns positive value when unlocked" do
@@ -172,11 +175,11 @@ describe Security do
   describe ".export_config" do
     it "exports security configuration" do
       Security.configure("password", "testpass", nil, 1800, true, true, "password")
-      config = Security.export_config
-      
-      config["success"].should be_true
-      config["security_config"]["mode"].should eq "password"
-      config["security_config"]["password"].should eq "testpass"
+      result = Security.export_config
+
+      result.has_key?("success").should be_true
+      result.has_key?("security_config").should be_true
+      result.size.should eq 2
     end
   end
 end

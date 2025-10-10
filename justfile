@@ -97,7 +97,7 @@ package-macos: build-macos
         binary_name="{{binary_name}}-{{version}}-darwin-x86_64"; \
         archive_name="{{binary_name}}-{{version}}-darwin-x86_64.tar.gz"; \
     fi; \
-    tar -czf packages/$$archive_name -C {{bin_dir}} $$binary_name gentility.conf.example; \
+    tar -czf packages/$$archive_name -C {{bin_dir}} $$binary_name gentility.yaml.example; \
     echo "✅ macOS archive created: packages/$$archive_name"
 
 # Create DEB package for AMD64 

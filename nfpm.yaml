@@ -42,9 +42,16 @@ contents:
       owner: root
       group: root
 
-  # Configuration file template
-  - src: ./gentility.conf.example
+  # Configuration file templates (both old and new format)
+  - src: ./gentility.yaml.example
     dst: /etc/gentility.conf.example
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: ./gentility.yaml.example
+    dst: /etc/gentility.yaml.example
     file_info:
       mode: 0644
       owner: root

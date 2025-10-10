@@ -97,6 +97,7 @@ gentility setup YOUR_TOKEN_HERE
 ```
 
 The `setup` command will:
+
 - Create a new config file if none exists
 - Update the token in an existing config file (preserving other settings)
 - Handle both commented and uncommented token lines
@@ -105,8 +106,8 @@ Or manually edit the configuration:
 
 ```bash
 # Manual setup
-sudo cp /etc/gentility.conf.example /etc/gentility.conf
-sudo nano /etc/gentility.conf
+sudo cp /etc/gentility.yaml.example /etc/gentility.yaml
+sudo nano /etc/gentility.yaml
 ```
 
 **Required configuration:**
@@ -142,7 +143,7 @@ sudo systemctl disable gentility
 sudo apt remove gentility-agent
 
 # Optional: Remove configuration and logs
-sudo rm -rf /etc/gentility.conf
+sudo rm -rf /etc/gentility.yaml
 sudo rm -rf /var/log/gentility-agent
 sudo rm -rf /var/lib/gentility-agent
 
@@ -153,14 +154,14 @@ sudo rm /etc/apt/keyrings/gentility-packages.asc
 
 ## Configuration
 
-The agent is configured through `/etc/gentility.conf`.
+The agent is configured through `/etc/gentility.yaml`.
 
 ### Configuration File
 
 The only required configuration is your access token:
 
 ```bash
-# /etc/gentility.conf
+# /etc/gentility.yaml
 GENTILITY_TOKEN="gnt_1234567890abcdef"
 ```
 
@@ -171,7 +172,7 @@ Get your access token from your Gentility AI dashboard.
 The configuration file supports additional security and operational settings:
 
 ```bash
-# /etc/gentility.conf
+# /etc/gentility.yaml
 
 # Required: Your access token
 GENTILITY_TOKEN="gnt_1234567890abcdef"
@@ -224,7 +225,7 @@ sudo journalctl -u gentility --since="1 hour ago"
 
 ```bash
 # Check configuration file
-sudo cat /etc/gentility.conf
+sudo cat /etc/gentility.yaml
 
 # Check service logs
 sudo journalctl -u gentility-agent --no-pager
@@ -294,7 +295,7 @@ gentility start --token=YOUR_TOKEN_HERE --debug
 ### Setup Commands
 
 ```bash
-# Initial setup (creates /etc/gentility.conf)
+# Initial setup (creates /etc/gentility.yaml)
 sudo gentility setup YOUR_TOKEN_HERE
 
 # After setup, start without specifying token
@@ -360,7 +361,7 @@ sudo gentility promiscuous auth password  # or 'totp'
 Configuration is loaded in this order (later sources override earlier ones):
 
 1. **Default values** (built into the application)
-2. **Configuration file** (`/etc/gentility.conf`)
+2. **Configuration file** (`/etc/gentility.yaml`)
 3. **Environment variables** (`GENTILITY_TOKEN`, `SERVER_URL`, etc.)
 4. **Command line arguments** (`--token=`, `--debug`)
 
@@ -385,7 +386,7 @@ gentility run
 - **Extendable sessions**: Each command execution extends the security session
 - **Hard timeout**: Sessions have an absolute maximum duration from first unlock
 - **Multiple auth modes**: Support for both TOTP and password authentication
-- **Secure storage**: All security settings are stored with 600 permissions in `/etc/gentility.conf`
+- **Secure storage**: All security settings are stored with 600 permissions in `/etc/gentility.yaml`
 - **QR code generation**: TOTP setup includes ASCII QR codes for easy authenticator app configuration
 
 ### Complete Command Reference
