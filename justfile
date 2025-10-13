@@ -390,6 +390,17 @@ release type="patch":
         echo "✅ macOS ARM64 binary built: ${macos_binary}"
     fi
 
+    echo ""
+    echo "🔐 Updating Homebrew formula SHA256 hashes..."
+    just update-formula-sha
+
+    echo ""
+    echo "📝 Committing formula changes to homebrew-agent repo..."
+    cd homebrew-agent && \
+        git add Formula/gentility-agent.rb && \
+        git commit -m "Update SHA256 hashes for v${current_version}" || echo "No formula changes to commit" && \
+        cd ..
+
     # Verify the Linux AMD64 DEB package exists (should be built remotely)
     linux_deb="packages/gentility-agent_${current_version}_amd64.deb"
     if [ ! -f "$linux_deb" ]; then
@@ -420,15 +431,12 @@ release type="patch":
             "${linux_deb}#Linux AMD64 DEB Package"
     fi
 
-    # Push homebrew-agent tap update if it exists
-    if [ -d "homebrew-agent" ]; then
-        echo "📦 Updating Homebrew tap..."
-        cd homebrew-agent
-        git add Formula/gentility-agent.rb
-        git commit -m "Update to version ${current_version}" || echo "No changes in tap"
-        git push origin master || echo "Failed to push tap - may need to set up remote"
+    # Push homebrew-agent tap changes
+    echo ""
+    echo "📦 Pushing Homebrew tap to GitHub..."
+    cd homebrew-agent && \
+        git push origin master || echo "⚠️  Failed to push tap - may need to set up remote" && \
         cd ..
-    fi
 
     echo ""
     echo "✅ Release v${current_version} completed successfully!"
@@ -529,6 +537,7 @@ version-bump type="patch":
     fi
 
     if [ -f "homebrew-agent/Formula/gentility-agent.rb" ]; then
+        sed -i '' "s/version \"$current_version\"/version \"$new_version\"/" homebrew-agent/Formula/gentility-agent.rb
         sed -i '' "s/tag: \"v$current_version\"/tag: \"v$new_version\"/" homebrew-agent/Formula/gentility-agent.rb
         echo "  ✅ Updated Homebrew tap formula"
     fi
@@ -543,6 +552,45 @@ version-bump type="patch":
     echo "Next steps:"
     echo "  1. Test the changes: just build-macos"
     echo "  2. Commit and tag: just release-commit"
+
+# Update Homebrew formula SHA256 hashes for built binaries
+update-formula-sha:
+    #!/bin/bash
+    set -e
+
+    current_version={{version}}
+    formula_path="homebrew-agent/Formula/gentility-agent.rb"
+
+    if [ ! -f "$formula_path" ]; then
+        echo "❌ Formula not found at $formula_path"
+        exit 1
+    fi
+
+    echo "📝 Updating Homebrew formula SHA256 hashes for v${current_version}..."
+
+    # Update macOS ARM64 SHA256 (line 10)
+    darwin_arm64_bin="{{bin_dir}}/{{binary_name}}-${current_version}-darwin-arm64"
+    if [ -f "$darwin_arm64_bin" ]; then
+        darwin_arm64_sha=$(shasum -a 256 "$darwin_arm64_bin" | cut -d' ' -f1)
+        echo "  ✅ macOS ARM64: $darwin_arm64_sha"
+        sed -i '' "10s/sha256 \".*\"/sha256 \"$darwin_arm64_sha\"/" "$formula_path"
+    else
+        echo "  ⚠️  macOS ARM64 binary not found, skipping"
+    fi
+
+    # Update Linux AMD64 SHA256 (line 27)
+    linux_amd64_bin="{{bin_dir}}/{{binary_name}}-${current_version}-linux-amd64"
+    if [ -f "$linux_amd64_bin" ]; then
+        linux_amd64_sha=$(shasum -a 256 "$linux_amd64_bin" | cut -d' ' -f1)
+        echo "  ✅ Linux AMD64: $linux_amd64_sha"
+        sed -i '' "27s/sha256 \".*\"/sha256 \"$linux_amd64_sha\"/" "$formula_path"
+    else
+        echo "  ⚠️  Linux AMD64 binary not found, skipping"
+    fi
+
+    echo ""
+    echo "✅ Formula SHA256 hashes updated successfully"
+    echo "   Formula: $formula_path"
 
 # Commit and tag after version bump
 release-commit:
