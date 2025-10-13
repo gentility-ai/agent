@@ -95,13 +95,30 @@ install_macos() {
 
     # Check if Homebrew is installed
     if ! command_exists brew; then
-        log_warn "Homebrew not found. Installing Homebrew first..."
-        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+        log_warn "Homebrew is not installed on this system."
+        echo ""
+        echo -n "Homebrew is required to install Gentility Agent. Would you like to install it? [y/N]: "
+        read -r response
 
-        # Add Homebrew to PATH for Apple Silicon Macs
-        if [ "$ARCH" = "arm64" ] && [ -f /opt/homebrew/bin/brew ]; then
-            eval "$(/opt/homebrew/bin/brew shellenv)"
-        fi
+        case "$response" in
+            [yY][eE][sS]|[yY])
+                log_info "Installing Homebrew..."
+                /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+                # Add Homebrew to PATH for Apple Silicon Macs
+                if [ "$ARCH" = "arm64" ] && [ -f /opt/homebrew/bin/brew ]; then
+                    eval "$(/opt/homebrew/bin/brew shellenv)"
+                fi
+                ;;
+            *)
+                log_info "Installation cancelled."
+                echo ""
+                log_info "To install manually:"
+                echo "  1. Install Homebrew: https://brew.sh"
+                echo "  2. Run this script again"
+                exit 0
+                ;;
+        esac
     fi
 
     # Install via Homebrew tap
