@@ -108,14 +108,17 @@ install_macos() {
     log_info "Adding Gentility Homebrew tap..."
     brew tap gentility-ai/agent
 
+    log_info "Updating Homebrew ..."
+    brew update
+
     log_info "Installing gentility-agent..."
     brew install gentility-agent
 
     log_info "✓ Installation complete!"
     echo ""
     log_info "Next steps:"
-    echo "  1. Get your access token from https://dashboard.gentility.ai"
-    echo "  2. Run: gentility setup YOUR_TOKEN_HERE"
+    echo "  1. Run: gentility auth"
+    echo "  2. Follow the prompts to authenticate"
     echo "  3. Start the agent: gentility run"
 }
 
@@ -151,8 +154,8 @@ install_apt_repo() {
     log_info "✓ Installation complete!"
     echo ""
     log_info "Next steps:"
-    echo "  1. Get your access token from https://dashboard.gentility.ai"
-    echo "  2. Run: sudo gentility setup YOUR_TOKEN_HERE"
+    echo "  1. Run: gentility auth"
+    echo "  2. Follow the prompts to authenticate"
     echo "  3. Start the service: sudo systemctl start gentility"
     echo "  4. Enable auto-start: sudo systemctl enable gentility"
 }
@@ -175,7 +178,7 @@ install_deb_direct() {
         VERSION=$(curl -fsSL https://api.github.com/repos/gentility-ai/agent/releases/latest | jq -r .tag_name | sed 's/^v//')
     else
         # Fallback to a recent known version
-        VERSION="1.0.36"
+        VERSION="1.1.1"
         log_warn "Could not fetch latest version, using v$VERSION"
     fi
 
@@ -209,8 +212,8 @@ install_deb_direct() {
     log_info "✓ Installation complete!"
     echo ""
     log_info "Next steps:"
-    echo "  1. Get your access token from https://dashboard.gentility.ai"
-    echo "  2. Run: sudo gentility setup YOUR_TOKEN_HERE"
+    echo "  1. Run: gentility auth"
+    echo "  2. Follow the prompts to authenticate"
     echo "  3. Start the service: sudo systemctl start gentility"
     echo "  4. Enable auto-start: sudo systemctl enable gentility"
 }
