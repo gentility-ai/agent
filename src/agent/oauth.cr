@@ -11,23 +11,26 @@ module OAuth
   class Config
     PRODUCTION_AUTHORIZE_URL = "https://core.gentility.ai/oauth/authorize"
     PRODUCTION_TOKEN_URL     = "https://core.gentility.ai/oauth/token"
+    PRODUCTION_DEVICE_CODE_URL = "https://core.gentility.ai/oauth/device/code"
     DEVELOPMENT_AUTHORIZE_URL = "https://termite-lasting-lively.ngrok-free.app/oauth/authorize"
     DEVELOPMENT_TOKEN_URL     = "https://termite-lasting-lively.ngrok-free.app/oauth/token"
+    DEVELOPMENT_DEVICE_CODE_URL = "https://termite-lasting-lively.ngrok-free.app/oauth/device/code"
     CLIENT_ID                = "gentility-agent"
     SCOPES                   = "agent:connect agent:execute"
 
     getter authorization_endpoint : String
     getter token_endpoint : String
+    getter device_code_endpoint : String
     getter client_id : String
     getter scopes : String
 
     def initialize(environment : String = "prod")
-      @authorization_endpoint, @token_endpoint = case environment
-                                                 when "dev", "development"
-                                                   {DEVELOPMENT_AUTHORIZE_URL, DEVELOPMENT_TOKEN_URL}
-                                                 else
-                                                   {PRODUCTION_AUTHORIZE_URL, PRODUCTION_TOKEN_URL}
-                                                 end
+      @authorization_endpoint, @token_endpoint, @device_code_endpoint = case environment
+                                                                         when "dev", "development"
+                                                                           {DEVELOPMENT_AUTHORIZE_URL, DEVELOPMENT_TOKEN_URL, DEVELOPMENT_DEVICE_CODE_URL}
+                                                                         else
+                                                                           {PRODUCTION_AUTHORIZE_URL, PRODUCTION_TOKEN_URL, PRODUCTION_DEVICE_CODE_URL}
+                                                                         end
       @client_id = CLIENT_ID
       @scopes = SCOPES
     end
@@ -41,6 +44,18 @@ module OAuth
     property refresh_token : String?
     property expires_in : Int32?
     property token_type : String
+  end
+
+  # Device code response
+  struct DeviceCodeResponse
+    include JSON::Serializable
+
+    property device_code : String
+    property user_code : String
+    property verification_uri : String
+    property verification_uri_complete : String?
+    property expires_in : Int32
+    property interval : Int32?
   end
 
   # PKCE (Proof Key for Code Exchange) generator
@@ -141,6 +156,74 @@ module OAuth
         TokenResponse.from_json(response.body)
       else
         raise "Token refresh failed: HTTP #{response.status_code} - #{response.body}"
+      end
+    end
+
+    # Request device code for device flow (RFC 8628)
+    def request_device_code : DeviceCodeResponse
+      client = HTTP::Client.new(URI.parse(@config.device_code_endpoint))
+
+      body = URI::Params.build do |form|
+        form.add "client_id", @config.client_id
+        form.add "scope", @config.scopes
+      end
+
+      headers = HTTP::Headers{
+        "Content-Type" => "application/x-www-form-urlencoded",
+      }
+
+      response = client.post(@config.device_code_endpoint, headers: headers, body: body)
+
+      if response.status_code == 200
+        DeviceCodeResponse.from_json(response.body)
+      else
+        raise "Device code request failed: HTTP #{response.status_code} - #{response.body}"
+      end
+    end
+
+    # Poll for token using device code
+    def poll_for_token(device_code : String, interval : Int32 = 5) : TokenResponse
+      client = HTTP::Client.new(URI.parse(@config.token_endpoint))
+
+      body = URI::Params.build do |form|
+        form.add "grant_type", "urn:ietf:params:oauth:grant-type:device_code"
+        form.add "device_code", device_code
+        form.add "client_id", @config.client_id
+      end
+
+      headers = HTTP::Headers{
+        "Content-Type" => "application/x-www-form-urlencoded",
+      }
+
+      loop do
+        response = client.post(@config.token_endpoint, headers: headers, body: body)
+
+        case response.status_code
+        when 200
+          # Success!
+          return TokenResponse.from_json(response.body)
+        when 400
+          # Check error type
+          error_data = JSON.parse(response.body)
+          error = error_data["error"]?.try(&.as_s)
+
+          case error
+          when "authorization_pending"
+            # User hasn't authorized yet, keep polling
+            sleep interval.seconds
+          when "slow_down"
+            # Server wants us to slow down
+            sleep (interval + 5).seconds
+          when "expired_token"
+            raise "Device code expired. Please try again."
+          when "access_denied"
+            raise "User denied authorization."
+          else
+            raise "Token request failed: #{error} - #{error_data["error_description"]?}"
+          end
+        else
+          raise "Token request failed: HTTP #{response.status_code} - #{response.body}"
+        end
       end
     end
 
@@ -402,6 +485,41 @@ module OAuth
       ensure
         callback_server.stop
       end
+    end
+
+    # Device Code Flow - for SSH/remote scenarios
+    def self.authenticate_device(environment : String = "prod") : TokenResponse
+      auth = Authenticator.new(environment)
+
+      # Step 1: Request device code
+      puts "🔐 Starting device authentication..."
+      puts ""
+
+      device_response = auth.request_device_code
+
+      # Step 2: Display instructions to user
+      puts "📱 Please authorize this device:"
+      puts ""
+      puts "  1. Visit: #{device_response.verification_uri}"
+      puts "  2. Enter code: #{device_response.user_code}"
+      puts ""
+
+      # If server provided a complete URI, show it too
+      if complete_uri = device_response.verification_uri_complete
+        puts "Or visit this URL directly:"
+        puts "  #{complete_uri}"
+        puts ""
+      end
+
+      puts "⏳ Waiting for authorization (expires in #{device_response.expires_in} seconds)..."
+      puts ""
+
+      # Step 3: Poll for token
+      interval = device_response.interval || 5
+      tokens = auth.poll_for_token(device_response.device_code, interval)
+
+      puts "✅ Authentication successful!"
+      tokens
     end
 
     private def self.open_browser(url : String) : Bool

@@ -28,7 +28,6 @@ require "process"
 require "file"
 require "crotp"
 require "qr-code"
-require "./oauth"
 require "yaml"
 require "ed25519"
 require "base58"
@@ -36,332 +35,56 @@ require "crypto/subtle"
 require "openssl/cipher"
 require "base64"
 
+# Agent modules
+require "./agent/oauth"
+
+require "./agent/security"
+require "./agent/crypto"
+require "./agent/config"
+require "./agent/database"
+require "./agent/cli"
+
 # Read version from VERSION file at compile time
 VERSION = {{ read_file("VERSION").strip }}
 
-# Global security state management
-module Security
-  @@mode : String = "none"
-  @@password : String? = nil
-  @@totp_secret : String? = nil
-  @@unlock_timeout : Int32 = 1800
-  @@extendable : Bool = true
-  @@active : Bool = false
-  @@unlock_time : Time? = nil
-  @@initial_unlock_time : Time? = nil
-  @@promiscuous_enabled : Bool = true
-  @@promiscuous_auth_mode : String = "password"
-
-  def self.configure(mode : String, password : String?, totp_secret : String?, timeout : Int32, extendable : Bool, promiscuous_enabled : Bool = true, promiscuous_auth_mode : String = "password")
-    @@mode = mode
-    @@password = password
-    @@totp_secret = totp_secret
-    @@unlock_timeout = timeout
-    @@extendable = extendable
-    @@promiscuous_enabled = promiscuous_enabled
-    @@promiscuous_auth_mode = promiscuous_auth_mode
-  end
-
-  def self.mode
-    @@mode
-  end
-
-  def self.unlocked?
-    return true if @@mode == "none"
-
-    return false unless @@active
-
-    now = Time.utc
-    return false unless @@unlock_time && @@initial_unlock_time
-
-    # Check if we've exceeded the hard timeout from initial unlock
-    if now - @@initial_unlock_time.not_nil! > @@unlock_timeout.seconds
-      lock
-      return false
-    end
-
-    # If extendable, also check the rolling timeout
-    if @@extendable && now - @@unlock_time.not_nil! > @@unlock_timeout.seconds
-      lock
-      return false
-    end
-
-    true
-  end
-
-  def self.unlock(password_or_totp : String) : Bool
-    return true if @@mode == "none"
-
-    success = case @@mode
-              when "password"
-                @@password && password_or_totp == @@password
-              when "totp"
-                validate_totp(password_or_totp)
-              else
-                false
-              end
-
-    if success
-      now = Time.utc
-      @@active = true
-      @@unlock_time = now
-      @@initial_unlock_time = now unless @@initial_unlock_time
-    end
-
-    !!success
-  end
-
-  def self.extend_unlock
-    return unless @@active && @@extendable
-    @@unlock_time = Time.utc
-  end
-
-  def self.lock
-    @@active = false
-    @@unlock_time = nil
-    @@initial_unlock_time = nil
-  end
-
-  def self.time_remaining : Int32
-    return -1 if @@mode == "none" || !@@active
-    return 0 unless @@unlock_time && @@initial_unlock_time
-
-    now = Time.utc
-    initial_elapsed = (now - @@initial_unlock_time.not_nil!).total_seconds.to_i
-    hard_remaining = @@unlock_timeout - initial_elapsed
-
-    if @@extendable
-      rolling_elapsed = (now - @@unlock_time.not_nil!).total_seconds.to_i
-      rolling_remaining = @@unlock_timeout - rolling_elapsed
-      [hard_remaining, rolling_remaining].min
-    else
-      hard_remaining
-    end
-  end
-
-  def self.status
-    {
-      "security_enabled" => @@mode != "none",
-      "security_mode"    => @@mode,
-      "active"           => unlocked?,
-      "time_remaining"   => time_remaining,
-      "extendable"       => @@extendable,
-    }
-  end
-
-  def self.validate_promiscuous_auth(credential : String) : Bool
-    return false unless @@promiscuous_enabled
-
-    success = case @@promiscuous_auth_mode
-              when "password"
-                @@password && credential == @@password
-              when "totp"
-                validate_totp(credential)
-              else
-                false
-              end
-
-    !!success
-  end
-
-  def self.promiscuous_enabled?
-    @@promiscuous_enabled
-  end
-
-  def self.export_config
-    {
-      "success"         => true,
-      "security_config" => {
-        "mode"                  => @@mode,
-        "password"              => @@password,
-        "totp_secret"           => @@totp_secret,
-        "timeout"               => @@unlock_timeout,
-        "extendable"            => @@extendable,
-        "promiscuous_enabled"   => @@promiscuous_enabled,
-        "promiscuous_auth_mode" => @@promiscuous_auth_mode,
-      },
-    }
-  end
-
-  private def self.validate_totp(code : String) : Bool
-    return false unless @@totp_secret
-
-    begin
-      totp = CrOTP::TOTP.new(@@totp_secret.not_nil!)
-      totp.verify(code)
-    rescue
-      false
-    end
-  end
-end
-
-# Cryptographic utilities for Ed25519 keypairs and credential encryption
-module AgentCrypto
-  # Parse an Ed25519 private key from base58 string and return signing key
-  def self.parse_private_key(base58_key : String) : Ed25519::SigningKey
-    key_bytes = Base58.decode(base58_key).to_slice
-
-    # Validate key length before creating SigningKey
-    if key_bytes.size != 32
-      raise Ed25519::VerifyError.new("Expected 32 bytes. Key is only #{key_bytes.size} bytes")
-    end
-
-    Ed25519::SigningKey.new(key_bytes)
-  end
-
-  # Get public key from private key as base58 string
-  def self.public_key_base58(signing_key : Ed25519::SigningKey) : String
-    verify_key = signing_key.verify_key
-    Base58.encode(verify_key.key_bytes)
-  end
-
-  # Derive AES-256 key from Ed25519 private key
-  # Uses first 32 bytes of the signing key as AES key
-  def self.derive_aes_key(signing_key : Ed25519::SigningKey) : Bytes
-    # Ed25519 private key is 32 bytes, perfect for AES-256
-    signing_key.key_bytes
-  end
-
-  # Encrypt data with AES-256-CBC using the signing key
-  def self.encrypt(signing_key : Ed25519::SigningKey, plaintext : String) : String
-    aes_key = derive_aes_key(signing_key)
-
-    # Generate random IV
-    iv = Random::Secure.random_bytes(16)
-
-    # Create cipher
-    cipher = OpenSSL::Cipher.new("AES-256-CBC")
-    cipher.encrypt
-    cipher.key = aes_key
-    cipher.iv = iv
-
-    # Encrypt
-    encrypted = IO::Memory.new
-    encrypted.write(iv) # Prepend IV to ciphertext
-    encrypted.write(cipher.update(plaintext))
-    encrypted.write(cipher.final)
-
-    # Return base64 encoded result
-    Base64.strict_encode(encrypted.to_slice)
-  end
-
-  # Decrypt data with AES-256-CBC using the signing key
-  def self.decrypt(signing_key : Ed25519::SigningKey, ciphertext_b64 : String) : String
-    aes_key = derive_aes_key(signing_key)
-
-    # Decode base64
-    ciphertext = Base64.decode(ciphertext_b64)
-
-    # Extract IV (first 16 bytes)
-    iv = ciphertext[0, 16]
-    encrypted_data = ciphertext[16..-1]
-
-    # Create cipher
-    cipher = OpenSSL::Cipher.new("AES-256-CBC")
-    cipher.decrypt
-    cipher.key = aes_key
-    cipher.iv = iv
-
-    # Decrypt
-    decrypted = IO::Memory.new
-    decrypted.write(cipher.update(encrypted_data))
-    decrypted.write(cipher.final)
-
-    String.new(decrypted.to_slice)
-  end
-
-  # Store encrypted credentials in config file
-  def self.store_credentials(config_file : String, db_target_id : String, credentials : String, signing_key : Ed25519::SigningKey)
-    # Encrypt credentials
-    encrypted = encrypt(signing_key, credentials)
-
-    # Load config
-    config = if File.exists?(config_file)
-               YAML.parse(File.read(config_file))
-             else
-               YAML.parse("{}")
-             end
-
-    config_hash = config.as_h? || {} of YAML::Any => YAML::Any
-
-    # Get or create encrypted_db_credentials section
-    creds_section = if existing = config_hash[YAML::Any.new("encrypted_db_credentials")]?
-                      existing.as_h? || {} of YAML::Any => YAML::Any
-                    else
-                      {} of YAML::Any => YAML::Any
-                    end
-
-    # Store encrypted credentials
-    creds_section[YAML::Any.new(db_target_id)] = YAML::Any.new(encrypted)
-    config_hash[YAML::Any.new("encrypted_db_credentials")] = YAML::Any.new(creds_section)
-
-    # Write back to file
-    File.write(config_file, config_hash.to_yaml)
-    File.chmod(config_file, 0o600)
-  end
-
-  # Load and decrypt credentials from config file
-  def self.load_credentials(config_file : String, db_target_id : String, signing_key : Ed25519::SigningKey) : String?
-    return nil unless File.exists?(config_file)
-
-    config = YAML.parse(File.read(config_file))
-    config_hash = config.as_h? || {} of YAML::Any => YAML::Any
-
-    creds_section = config_hash[YAML::Any.new("encrypted_db_credentials")]?
-    return nil unless creds_section
-
-    creds_hash = creds_section.as_h? || {} of YAML::Any => YAML::Any
-    encrypted = creds_hash[YAML::Any.new(db_target_id)]?
-    return nil unless encrypted
-
-    encrypted_str = encrypted.as_s? || return nil
-    decrypt(signing_key, encrypted_str)
-  rescue ex
-    puts "Warning: Failed to load credentials for #{db_target_id}: #{ex.message}"
-    nil
-  end
-end
-
 class GentilityAgent
   @websocket : HTTP::WebSocket?
-  @access_key : String
+  @machine_key : String? # Ed25519 private key (if provisioned)
+  @oauth_token : String? # OAuth access token (if using OAuth)
   @server_url : String
   @nickname : String
   @environment : String
   @running : Bool = false
   @ping_fiber : Fiber?
   @debug : Bool = false
-  @signing_key : Ed25519::SigningKey
-  @public_key : String
+  @signing_key : Ed25519::SigningKey?
+  @public_key : String?
 
-  def initialize(@access_key : String, @server_url : String, @nickname : String, @environment : String = "prod", @debug : Bool = false)
-    # Parse Ed25519 private key from access_key
-    @signing_key = parse_and_validate_key(@access_key)
-    @public_key = AgentCrypto.public_key_base58(@signing_key)
-
-    puts "Agent Public Key: #{@public_key}" if @debug
+  def initialize(access_key : String, @server_url : String, @nickname : String, @environment : String = "prod", @debug : Bool = false)
+    # Try to parse as Ed25519 key first (machine_key)
+    # If that fails, treat it as OAuth token
+    begin
+      @signing_key = AgentCrypto.parse_private_key(access_key)
+      @public_key = AgentCrypto.public_key_base58(@signing_key.not_nil!)
+      @machine_key = access_key
+      @oauth_token = nil
+      puts "Using machine key authentication" if @debug
+      puts "Agent Public Key: #{@public_key}" if @debug
+    rescue
+      # Not an Ed25519 key, treat as OAuth token
+      @signing_key = nil
+      @public_key = nil
+      @machine_key = nil
+      @oauth_token = access_key
+      puts "Using OAuth token authentication" if @debug
+    end
 
     load_security_config
   end
 
-  private def parse_and_validate_key(access_key : String) : Ed25519::SigningKey
-    AgentCrypto.parse_private_key(access_key)
-  rescue ex : Ed25519::VerifyError
-    puts "❌ Error: Invalid access key format"
-    puts ""
-    puts "The provided access key is not a valid Ed25519 private key."
-    puts "Ed25519 keys must be exactly 32 bytes when decoded from base58."
-    puts ""
-    puts "Please check that you copied the full key from the Gentility dashboard."
-    exit 1
-  rescue ex : Exception
-    puts "❌ Error parsing access key: #{ex.message}"
-    exit 1
-  end
-
   private def load_security_config
-    config_file = get_config_path
-    config = load_config_from_file(config_file)
+    config_file = AgentConfig.get_config_path
+    config = AgentConfig.load_config_from_file(config_file)
     return Security.configure("none", nil, nil, 1800, true, true, "password") unless config
 
     # Support both YAML security section and legacy flat keys
@@ -416,7 +139,7 @@ class GentilityAgent
   end
 
   private def save_security_config(mode : String, password : String?, totp_secret : String?, timeout : Int32, extendable : Bool)
-    config_file = get_config_path
+    config_file = AgentConfig.get_config_path
 
     # Read and parse existing YAML config
     config = if File.exists?(config_file)
@@ -535,7 +258,13 @@ class GentilityAgent
       port: uri.port,
       path: "/agent/ws/websocket",
       query: URI::Params.build do |params|
-        params.add "access_key", @public_key # Send public key for authentication
+        if @public_key
+          # Machine key mode: send public key
+          params.add "access_key", @public_key.not_nil!
+        elsif @oauth_token
+          # OAuth mode: send OAuth token
+          params.add "oauth_token", @oauth_token.not_nil!
+        end
         params.add "version", VERSION
         params.add "security_mode", Security.mode
         params.add "security_enabled", (Security.mode != "none").to_s
@@ -610,9 +339,38 @@ class GentilityAgent
   private def handle_parsed_message(msg : MessagePack::Any)
     case msg["type"]?.try(&.to_s)
     when "welcome"
-      puts "Received welcome from server!"
+      puts "✅ Connected to server!"
       server_target_id = msg["server_target_id"]?.try(&.to_s)
       puts "Server Target ID: #{server_target_id}" if server_target_id
+    when "error"
+      # Handle error messages from server
+      error_code = msg["error"]?.try(&.to_s)
+      error_message = msg["message"]?.try(&.to_s) || "Unknown error"
+
+      puts ""
+      puts "❌ Server Error: #{error_message}"
+
+      # Handle specific error cases
+      case error_code
+      when "token_expired", "invalid_token"
+        puts ""
+        puts "Your OAuth token has expired or is invalid."
+        puts "Please re-authenticate by running:"
+        puts "  gentility auth"
+        puts ""
+        exit 1
+      when "insufficient_scope"
+        puts ""
+        puts "Your OAuth token is missing required scopes."
+        puts "Please re-authenticate by running:"
+        puts "  gentility auth"
+        puts ""
+        exit 1
+      else
+        puts ""
+        puts "Error code: #{error_code}" if error_code
+        exit 1
+      end
     when "ping"
       # Respond to ping with security status
       response = {"type" => "pong", "timestamp" => Time.utc.to_unix_f}
@@ -726,6 +484,7 @@ class GentilityAgent
       end
     when "psql_query_encrypted"
       return {"error" => "Agent unlock required for database queries"} unless Security.unlocked?
+      return {"error" => "Machine key required for encrypted credentials"} unless @signing_key
       Security.extend_unlock
 
       db_target_id = params.try(&.["db_target_id"]?.try(&.to_s))
@@ -733,8 +492,8 @@ class GentilityAgent
 
       if db_target_id && query
         # Load credentials from encrypted storage
-        config_file = get_config_path
-        creds_json = AgentCrypto.load_credentials(config_file, db_target_id, @signing_key)
+        config_file = AgentConfig.get_config_path
+        creds_json = AgentCrypto.load_credentials(config_file, db_target_id, @signing_key.not_nil!)
 
         unless creds_json
           return {"error" => "Credentials not found for db_target_id: #{db_target_id}"}
@@ -758,6 +517,7 @@ class GentilityAgent
       end
     when "mysql_query_encrypted"
       return {"error" => "Agent unlock required for database queries"} unless Security.unlocked?
+      return {"error" => "Machine key required for encrypted credentials"} unless @signing_key
       Security.extend_unlock
 
       db_target_id = params.try(&.["db_target_id"]?.try(&.to_s))
@@ -765,8 +525,8 @@ class GentilityAgent
 
       if db_target_id && query
         # Load credentials from encrypted storage
-        config_file = get_config_path
-        creds_json = AgentCrypto.load_credentials(config_file, db_target_id, @signing_key)
+        config_file = AgentConfig.get_config_path
+        creds_json = AgentCrypto.load_credentials(config_file, db_target_id, @signing_key.not_nil!)
 
         unless creds_json
           return {"error" => "Credentials not found for db_target_id: #{db_target_id}"}
@@ -844,14 +604,15 @@ class GentilityAgent
       send_status
       {"success" => true, "message" => "Status update sent"}
     when "store_credentials"
+      return {"error" => "Machine key required for credential storage"} unless @signing_key
       # Store encrypted database credentials on the agent
       db_target_id = params.try(&.["db_target_id"]?.try(&.to_s))
       credentials = params.try(&.["credentials"]?.try(&.to_s))
 
       if db_target_id && credentials
         begin
-          config_file = get_config_path
-          AgentCrypto.store_credentials(config_file, db_target_id, credentials, @signing_key)
+          config_file = AgentConfig.get_config_path
+          AgentCrypto.store_credentials(config_file, db_target_id, credentials, @signing_key.not_nil!)
           {"success" => true, "message" => "Credentials stored securely"}
         rescue ex : Exception
           {"error" => "Failed to store credentials: #{ex.message}"}
@@ -986,94 +747,11 @@ class GentilityAgent
   end
 
   private def execute_psql_query(host : String, port : Int32, dbname : String, query : String, username : String?, password : String?)
-    puts "Executing PostgreSQL query on #{host}:#{port}/#{dbname}"
-    puts "Query: #{query}"
-
-    begin
-      # Use psql with environment variable to avoid password prompt
-      escaped_query = query.gsub("\"", "\\\"").gsub("`", "\\`").gsub("$", "\\$")
-
-      # Build the psql command with proper authentication
-      psql_cmd = "PGPASSWORD='#{password || ""}' psql -h #{host} -p #{port}"
-      psql_cmd += " -U #{username}" if username
-      psql_cmd += " -d #{dbname} -t -A -c \"#{escaped_query}\""
-
-      execute_db_command(psql_cmd, "|", "PostgreSQL")
-    rescue ex : Exception
-      {
-        "success"   => false,
-        "error"     => "Failed to execute PostgreSQL query: #{ex.message}",
-        "rows"      => [] of Array(String),
-        "row_count" => 0,
-      }
-    end
+    AgentDatabase.execute_psql_query(host, port, dbname, query, username, password)
   end
 
   private def execute_mysql_query(host : String, port : Int32, dbname : String, query : String)
-    puts "Executing MySQL query on #{host}:#{port}/#{dbname}"
-    puts "Query: #{query}"
-
-    begin
-      # Use mysql with batch mode to avoid password prompt
-      escaped_query = query.gsub("\"", "\\\"").gsub("`", "\\`").gsub("$", "\\$")
-      mysql_cmd = "mysql -h #{host} -P #{port} -D #{dbname} --batch --raw --skip-column-names -e \"#{escaped_query}\""
-
-      execute_db_command(mysql_cmd, "\t", "MySQL")
-    rescue ex : Exception
-      {
-        "success"   => false,
-        "error"     => "Failed to execute MySQL query: #{ex.message}",
-        "rows"      => [] of Array(String),
-        "row_count" => 0,
-      }
-    end
-  end
-
-  private def execute_db_command(command : String, delimiter : String, db_type : String)
-    puts "Executing: #{command}"
-
-    process = Process.new(
-      command,
-      shell: true,
-      input: Process::Redirect::Close,
-      output: Process::Redirect::Pipe,
-      error: Process::Redirect::Pipe
-    )
-
-    stdout = process.output.gets_to_end
-    stderr = process.error.gets_to_end
-    exit_status = process.wait
-
-    if exit_status.success?
-      # Parse the output into rows
-      rows = if stdout.strip.empty?
-               [] of Array(String)
-             else
-               stdout.strip.split("\n").map do |line|
-                 line.split(delimiter).map(&.strip)
-               end
-             end
-
-      {
-        "success"   => true,
-        "rows"      => rows,
-        "row_count" => rows.size,
-      }
-    else
-      error_message = stderr.empty? ? "Query failed" : stderr.strip
-
-      # Provide helpful authentication error messages
-      if error_message.includes?("authentication") || error_message.includes?("Access denied")
-        error_message = "#{db_type} authentication required. Please configure credentials on the agent server."
-      end
-
-      {
-        "success"   => false,
-        "error"     => error_message,
-        "rows"      => [] of Array(String),
-        "row_count" => 0,
-      }
-    end
+    AgentDatabase.execute_mysql_query(host, port, dbname, query)
   end
 
   private def send_response(request_id : String, result)
@@ -1205,932 +883,6 @@ class GentilityAgent
       debug_log("→ Send error: #{ex.message}")
     end
   end
-end
-
-# Configuration and argument parsing
-def load_config_from_file(path : String) : YAML::Any?
-  return nil unless File.exists?(path)
-
-  YAML.parse(File.read(path))
-rescue ex : Exception
-  puts "Error reading config file: #{ex.message}"
-  nil
-end
-
-def parse_arguments
-  # 1. Start with defaults
-  access_key = nil
-  server_url = nil # Will be set based on environment
-  nickname = `hostname`.strip
-  environment = "prod"
-  debug = false
-
-  # 2. Load configuration from file if it exists
-  config_file = get_config_path
-  config = load_config_from_file(config_file)
-
-  # Apply config file settings (YAML format)
-  if config
-    # Support both snake_case (YAML convention) and legacy SCREAMING_CASE
-    access_key = config["access_key"]?.try(&.as_s?) ||
-                 config["ACCESS_KEY"]?.try(&.as_s?) ||
-                 config["GENTILITY_TOKEN"]?.try(&.as_s?)
-
-    server_url = config["server_url"]?.try(&.as_s?) ||
-                 config["SERVER_URL"]?.try(&.as_s?) ||
-                 server_url
-
-    nickname = config["nickname"]?.try(&.as_s?) ||
-               config["NICKNAME"]?.try(&.as_s?) ||
-               nickname
-
-    environment = config["environment"]?.try(&.as_s?) ||
-                  config["ENVIRONMENT"]?.try(&.as_s?) ||
-                  environment
-
-    debug = config["debug"]?.try(&.as_bool?) ||
-            config["DEBUG"]?.try { |v| v.as_s?.try { |s| s.downcase == "true" || s == "1" || s.downcase == "yes" } } ||
-            debug
-  end
-
-  # 3. Override with environment variables (systemd loads config as env vars too)
-  if ENV["GENTILITY_TOKEN"]?
-    access_key = ENV["GENTILITY_TOKEN"]
-  end
-
-  if ENV["SERVER_URL"]?
-    server_url = ENV["SERVER_URL"]
-  end
-
-  if ENV["NICKNAME"]?
-    nickname = ENV["NICKNAME"]
-  end
-
-  if ENV["ENVIRONMENT"]?
-    environment = ENV["ENVIRONMENT"]
-  end
-
-  if ENV["DEBUG"]?
-    debug_env = ENV["DEBUG"].downcase
-    debug = (debug_env == "true" || debug_env == "1" || debug_env == "yes")
-  end
-
-  # 4. Override with CLI arguments (highest priority)
-  # Check for --token, --debug, and --env arguments
-  i = 0
-  while i < ARGV.size
-    arg = ARGV[i]
-    if arg.starts_with?("--token=")
-      access_key = arg.split("=", 2)[1]
-      i += 1
-    elsif arg == "--debug"
-      debug = true
-      i += 1
-    elsif arg == "-e" || arg == "--env"
-      if i + 1 < ARGV.size
-        environment = ARGV[i + 1]
-        i += 2
-      else
-        i += 1
-      end
-    else
-      i += 1
-    end
-  end
-
-  # Check for legacy positional arguments (backward compatibility)
-  non_token_args = ARGV.reject { |arg| arg.starts_with?("--token=") || arg == "--debug" || arg == "-e" || arg == "--env" || (ARGV.index(arg).try { |idx| idx > 0 && (ARGV[idx - 1] == "-e" || ARGV[idx - 1] == "--env") }) }
-
-  if non_token_args.size > 0 && !ARGV.any? { |arg| arg.starts_with?("--token=") }
-    access_key = non_token_args[0]
-  end
-
-  if non_token_args.size > 1
-    server_url = non_token_args[1]
-  end
-
-  if non_token_args.size > 2
-    nickname = non_token_args[2]
-  end
-
-  if non_token_args.size > 3
-    environment = non_token_args[3]
-  end
-
-  unless access_key
-    puts "ERROR: No access token provided!"
-    puts ""
-    puts "To start the agent, authenticate with OAuth:"
-    puts "  gentility auth"
-    puts ""
-    puts "Or use the run command with a token:"
-    puts "  gentility run --token=YOUR_TOKEN_HERE"
-    puts ""
-    puts "Or configure it permanently first:"
-    puts "  gentility setup YOUR_TOKEN_HERE"
-    puts "  gentility run"
-    puts ""
-    puts "For help: gentility help"
-    exit 1
-  end
-
-  # Set server_url based on environment if not explicitly configured
-  unless server_url
-    server_url = case environment
-                 when "dev", "development"
-                   "https://termite-lasting-lively.ngrok-free.app"
-                 else
-                   "https://core.gentility.ai"
-                 end
-  end
-
-  {access_key, server_url, nickname, environment, debug}
-end
-
-def get_config_path : String
-  # Check for environment variable first (used by Homebrew service)
-  if config_path = ENV["GENTILITY_CONFIG"]?
-    return config_path
-  end
-
-  # Platform-specific defaults
-  {% if flag?(:darwin) %}
-    # macOS - check for Homebrew installation
-    if File.exists?("/opt/homebrew/etc")
-      return "/opt/homebrew/etc/gentility.yaml"
-    elsif File.exists?("/usr/local/etc")
-      return "/usr/local/etc/gentility.yaml"
-    end
-  {% end %}
-
-  # Default to /etc for Linux and other systems
-  "/etc/gentility.yaml"
-end
-
-def setup_config(token : String)
-  config_file = get_config_path
-
-  # Check if config file already exists
-  if File.exists?(config_file)
-    puts "📝 Configuration file #{config_file} already exists."
-    puts "Updating access_key..."
-
-    # Read and parse existing YAML config
-    config = YAML.parse(File.read(config_file))
-    config_hash = config.as_h? || {} of YAML::Any => YAML::Any
-    config_hash[YAML::Any.new("access_key")] = YAML::Any.new(token)
-
-    # Write updated config back
-    File.write(config_file, config_hash.to_yaml)
-    puts "✅ Token updated in #{config_file}"
-    puts ""
-    puts "You can now start the service with:"
-    puts "  gentility run"
-    puts "  # Or as a service:"
-    puts "  brew services start gentility-agent  # macOS"
-    puts "  sudo systemctl start gentility        # Linux"
-    exit 0
-  end
-
-  # Check if we have permissions to write to /etc
-  begin
-    # Create full config content in YAML format
-    config_content = <<-CONFIG
-    # Gentility AI Agent Configuration
-    # Automatically generated by gentility setup
-
-    # REQUIRED: Your Gentility AI access token (Ed25519 private key in base58)
-    access_key: "#{token}"
-
-    # OPTIONAL: Server URL (default: wss://core.gentility.ai)
-    # server_url: wss://core.gentility.ai
-
-    # OPTIONAL: Agent nickname (default: hostname)
-    # nickname: #{`hostname`.strip}
-
-    # OPTIONAL: Environment (default: prod)
-    # environment: prod
-
-    # OPTIONAL: Debug logging (default: false)
-    # debug: false
-
-    # Security configuration
-    security:
-      # Security mode: none, password, or totp (default: none)
-      # mode: none
-
-      # Password for password mode
-      # password: your_secure_password
-
-      # TOTP secret for totp mode (base32 encoded)
-      # totp_secret: JBSWY3DPEHPK3PXP
-
-      # Unlock timeout in seconds (default: 1800 = 30 minutes)
-      # unlock_timeout: 1800
-
-      # Allow extending timeout on activity (default: true)
-      # extendable: true
-
-      # Promiscuous mode - allow server to export security config (default: true)
-      # promiscuous_enabled: true
-
-      # Promiscuous authentication mode: password or totp (default: password)
-      # promiscuous_auth_mode: password
-
-    # Encrypted database credentials (managed by server)
-    encrypted_db_credentials:
-      # Database credentials will be stored here as:
-      # db-target-uuid: base64_encrypted_credentials
-    CONFIG
-
-    # Write the config file
-    File.write(config_file, config_content)
-
-    # Set proper permissions (readable only by root)
-    File.chmod(config_file, 0o600)
-
-    puts "✅ Configuration saved to #{config_file}"
-    puts ""
-    puts "You can now start the service with:"
-    puts "  sudo systemctl start gentility"
-    puts "  sudo systemctl enable gentility"
-    puts ""
-    puts "To check the status:"
-    puts "  sudo systemctl status gentility"
-
-    exit 0
-  rescue ex : File::AccessDeniedError
-    puts "❌ Error: Permission denied. Please run with sudo:"
-    puts "  sudo #{PROGRAM_NAME} setup YOUR_TOKEN"
-    exit 1
-  rescue ex
-    puts "❌ Error saving configuration: #{ex.message}"
-    exit 1
-  end
-end
-
-def generate_totp_secret(length : Int32 = 32) : String
-  # Generate a random base32 secret
-  chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
-  secret = ""
-  length.times do
-    secret += chars[Random.rand(chars.size)]
-  end
-  secret
-end
-
-def generate_qr_ascii(text : String) : String
-  begin
-    # Use pure Crystal QR code library - no external dependencies!
-    # Try different sizes until one works for the URL length
-    qr = nil
-    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].each do |size|
-      begin
-        qr = QRCode.new(text, size: size, level: :l) # Use low error correction for more data
-        break
-      rescue
-        next
-      end
-    end
-
-    unless qr
-      return "QR Code too complex for display.\nManual entry URL: #{text}"
-    end
-
-    output = String.build do |str|
-      qr.modules.each do |row|
-        row.each do |col|
-          # Use ANSI background colors for better visibility
-          if col
-            str << "\033[40m  " # Black background (QR module)
-          else
-            str << "\033[47m  " # White background (empty space)
-          end
-        end
-        str << "\033[0m\n" # Reset color and newline
-      end
-    end
-    output
-  rescue ex : Exception
-    # Fallback if QR generation fails
-    "QR Code generation failed: #{ex.message}\nManual entry URL: #{text}"
-  end
-end
-
-def setup_security(mode : String, value : String? = nil)
-  config_file = get_config_path
-
-  case mode
-  when "totp"
-    # Generate TOTP secret if not provided
-    secret = value || generate_totp_secret
-
-    puts "🔐 TOTP Security Setup"
-    puts "===================="
-    puts ""
-    puts "Your TOTP secret: #{secret}"
-    puts ""
-    puts "Add this to your authenticator app by scanning the QR code below"
-    puts "or manually entering the secret."
-    puts ""
-
-    # Generate QR code URL for authenticator apps (keep it short)
-    hostname = `hostname`.strip rescue "agent"
-    hostname = hostname[0...10] if hostname.size > 10 # Truncate long hostnames
-    issuer = "Gentility"
-    totp_url = "otpauth://totp/#{issuer}:#{hostname}?secret=#{secret}&issuer=#{issuer}"
-
-    puts "Authenticator URL:"
-    puts totp_url
-    puts ""
-
-    # Generate ASCII QR code
-    puts "QR Code:"
-    puts generate_qr_ascii(totp_url)
-    puts ""
-
-    # Update config file
-    update_config(config_file, "SECURITY_MODE", "totp")
-    update_config(config_file, "SECURITY_TOTP_SECRET", secret)
-  when "password"
-    password = value
-    unless password
-      print "Enter password: "
-      password = gets.try(&.strip)
-    end
-
-    unless password && !password.empty?
-      puts "❌ Error: Password cannot be empty"
-      exit 1
-    end
-
-    puts "🔐 Password Security Setup"
-    puts "========================"
-    puts "Security mode set to password authentication."
-    puts ""
-
-    # Update config file
-    update_config(config_file, "SECURITY_MODE", "password")
-    update_config(config_file, "SECURITY_PASSWORD", password)
-  when "none"
-    puts "🔐 Security Disabled"
-    puts "==================="
-    puts "Security mode set to none - no authentication required."
-    puts ""
-
-    update_config(config_file, "SECURITY_MODE", "none")
-    remove_config(config_file, ["SECURITY_PASSWORD", "SECURITY_TOTP_SECRET"])
-  else
-    puts "❌ Error: Invalid security mode. Use: totp, password, or none"
-    exit 1
-  end
-
-  puts "✅ Security configuration saved to #{config_file}"
-  puts ""
-  puts "Restart the agent to apply new security settings:"
-  puts "  sudo systemctl restart gentility"
-
-  exit 0
-rescue ex : Exception
-  puts "❌ Error: #{ex.message}"
-  exit 1
-end
-
-def update_config(config_file : String, key : String, value : String)
-  lines = [] of String
-  found = false
-
-  if File.exists?(config_file)
-    File.each_line(config_file) do |line|
-      if line.starts_with?("#{key}=") || line.starts_with?("##{key}=")
-        lines << "#{key}=#{value}"
-        found = true
-      else
-        lines << line
-      end
-    end
-  end
-
-  unless found
-    lines << "#{key}=#{value}"
-  end
-
-  File.write(config_file, lines.join("\n") + "\n")
-  File.chmod(config_file, 0o600)
-end
-
-def remove_config(config_file : String, keys : Array(String))
-  return unless File.exists?(config_file)
-
-  lines = [] of String
-  File.each_line(config_file) do |line|
-    # Skip lines for the specified keys
-    next if keys.any? { |key| line.starts_with?("#{key}=") || line.starts_with?("##{key}=") }
-    lines << line
-  end
-
-  File.write(config_file, lines.join("\n") + "\n")
-  File.chmod(config_file, 0o600)
-end
-
-def save_oauth_tokens(tokens : OAuth::TokenResponse, environment : String)
-  config_file = get_config_path
-
-  puts "💾 Saving OAuth tokens to #{config_file}..."
-
-  # Update tokens in config
-  update_config(config_file, "GENTILITY_TOKEN", tokens.access_token)
-
-  if refresh_token = tokens.refresh_token
-    update_config(config_file, "OAUTH_REFRESH_TOKEN", refresh_token)
-  end
-
-  if expires_in = tokens.expires_in
-    expiry_time = Time.utc + expires_in.seconds
-    update_config(config_file, "OAUTH_TOKEN_EXPIRY", expiry_time.to_unix.to_s)
-  end
-
-  # Save the environment for future token refreshes
-  update_config(config_file, "ENVIRONMENT", environment)
-
-  puts "✅ OAuth tokens saved successfully!"
-  puts ""
-  puts "You can now start the agent with:"
-  puts "  gentility run"
-  puts "  # Or as a service:"
-  puts "  brew services start gentility-agent  # macOS"
-  puts "  sudo systemctl start gentility        # Linux"
-rescue ex : Exception
-  puts "❌ Error saving OAuth tokens: #{ex.message}"
-  exit 1
-end
-
-def run_oauth_flow(environment : String, headless : Bool)
-  puts "🔐 Starting OAuth authentication flow..."
-  puts "Environment: #{environment}"
-  puts ""
-
-  begin
-    tokens = OAuth::Flow.authenticate(environment, headless)
-    save_oauth_tokens(tokens, environment)
-  rescue ex : Exception
-    puts ""
-    puts "❌ OAuth authentication failed: #{ex.message}"
-    exit 1
-  end
-end
-
-def test_totp_validation(code : String)
-  config_file = get_config_path
-  config = load_config_from_file(config_file) || {} of String => String
-
-  totp_secret = config["SECURITY_TOTP_SECRET"]?
-  mode = config["SECURITY_MODE"]?
-
-  unless mode == "totp"
-    puts "❌ Error: TOTP mode is not configured"
-    puts "Run: #{PROGRAM_NAME} security totp"
-    exit 1
-  end
-
-  unless totp_secret
-    puts "❌ Error: No TOTP secret found in configuration"
-    exit 1
-  end
-
-  begin
-    totp = CrOTP::TOTP.new(totp_secret.as(String))
-    if totp.verify(code)
-      puts "✅ TOTP validation successful!"
-      puts "Code '#{code}' is valid for the configured secret."
-    else
-      puts "❌ TOTP validation failed!"
-      puts "Code '#{code}' is not valid. Check your authenticator app."
-    end
-  rescue ex : Exception
-    puts "❌ Error validating TOTP: #{ex.message}"
-    exit 1
-  end
-
-  exit 0
-end
-
-def show_promiscuous_status
-  config_file = get_config_path
-  config = load_config_from_file(config_file) || {} of String => String
-
-  enabled = config["PROMISCUOUS_ENABLED"]? != "false"
-  auth_mode = config["PROMISCUOUS_AUTH_MODE"]? || "password"
-
-  puts "🔐 Promiscuous Mode Status"
-  puts "========================="
-  puts "Enabled: #{enabled ? "✅ Yes" : "❌ No"}"
-  puts "Auth Mode: #{auth_mode}"
-  puts ""
-  puts "Promiscuous mode allows the server to export security"
-  puts "configuration for replication to other agents."
-
-  exit 0
-end
-
-def set_promiscuous_mode(enabled : Bool)
-  config_file = get_config_path
-
-  update_config(config_file, "PROMISCUOUS_ENABLED", enabled.to_s)
-
-  puts "🔐 Promiscuous Mode #{enabled ? "Enabled" : "Disabled"}"
-  puts "==============================#{enabled ? "=" : "=========="}"
-  puts "Promiscuous mode is now #{enabled ? "enabled" : "disabled"}."
-  puts ""
-  puts "Restart the agent to apply changes:"
-  puts "  sudo systemctl restart gentility"
-
-  exit 0
-rescue ex : Exception
-  puts "❌ Error: #{ex.message}"
-  exit 1
-end
-
-def set_promiscuous_auth_mode(mode : String)
-  unless ["password", "totp"].includes?(mode)
-    puts "❌ Error: Invalid auth mode. Use: password, totp"
-    exit 1
-  end
-
-  config_file = get_config_path
-
-  update_config(config_file, "PROMISCUOUS_AUTH_MODE", mode)
-
-  puts "🔐 Promiscuous Auth Mode Set"
-  puts "==========================="
-  puts "Promiscuous authentication mode set to: #{mode}"
-  puts ""
-  puts "This determines which credential is required for"
-  puts "promiscuous operations (uses the same password/TOTP as normal security)."
-  puts ""
-  puts "Restart the agent to apply changes:"
-  puts "  sudo systemctl restart gentility"
-
-  exit 0
-rescue ex : Exception
-  puts "❌ Error: #{ex.message}"
-  exit 1
-end
-
-def show_status
-  puts "Gentility Agent v#{VERSION}"
-  puts "==================#{("=" * VERSION.size)}"
-  puts ""
-
-  config_file = get_config_path
-  config = load_config_from_file(config_file) || {} of String => String
-
-  # Check if configured
-  if config["GENTILITY_TOKEN"]?
-    puts "✅ Configuration: Found"
-    puts "   Config file: #{config_file}"
-  else
-    puts "❌ Configuration: Not found"
-    puts "   Expected: #{config_file}"
-    puts "   Run: sudo gentility setup YOUR_TOKEN"
-    puts ""
-    return
-  end
-
-  # Show basic config
-  if token = config["GENTILITY_TOKEN"]?
-    puts "   Token: #{token[0..12]}..."
-  end
-  puts "   Server: #{config["SERVER_URL"]? || "ws://localhost:9000"}"
-  puts "   Nickname: #{config["NICKNAME"]? || `hostname`.strip}"
-  puts ""
-
-  # Security status
-  mode = config["SECURITY_MODE"]? || "none"
-  puts "🔐 Security Mode: #{mode}"
-
-  case mode
-  when "totp"
-    if config["SECURITY_TOTP_SECRET"]?
-      puts "   TOTP Secret: Configured"
-    else
-      puts "   TOTP Secret: Missing"
-    end
-  when "password"
-    if config["SECURITY_PASSWORD"]?
-      puts "   Password: Configured"
-    else
-      puts "   Password: Missing"
-    end
-  when "none"
-    puts "   No authentication required"
-  end
-  puts ""
-
-  # Service status
-  puts "🔄 Service Status:"
-  begin
-    result = `systemctl is-active gentility 2>/dev/null`.strip
-    case result
-    when "active"
-      puts "   ✅ Running"
-    when "inactive"
-      puts "   ❌ Stopped"
-    when "failed"
-      puts "   ❌ Failed"
-    else
-      puts "   ❓ Unknown (#{result})"
-    end
-
-    enabled = `systemctl is-enabled gentility 2>/dev/null`.strip
-    puts "   Auto-start: #{enabled == "enabled" ? "✅ Enabled" : "❌ Disabled"}"
-  rescue
-    puts "   ❓ Unable to check service status"
-  end
-  puts ""
-
-  # Promiscuous mode
-  promiscuous_enabled = config["PROMISCUOUS_ENABLED"]? != "false"
-  promiscuous_auth_mode = config["PROMISCUOUS_AUTH_MODE"]? || "password"
-  puts "🔗 Promiscuous Mode: #{promiscuous_enabled ? "✅ Enabled" : "❌ Disabled"}"
-  if promiscuous_enabled
-    puts "   Auth Mode: #{promiscuous_auth_mode}"
-  end
-  puts ""
-
-  puts "Commands:"
-  puts "   gentility run           Start agent"
-  puts "   sudo systemctl start gentility    Start service"
-  puts "   gentility help          Show help"
-end
-
-def show_version
-  puts "Gentility AI Agent v#{VERSION}"
-end
-
-def generate_keypair
-  # Generate a new Ed25519 keypair
-  signing_key = Ed25519::SigningKey.new
-  private_key_base58 = Base58.encode(signing_key.key_bytes)
-  public_key_base58 = AgentCrypto.public_key_base58(signing_key)
-
-  puts "🔑 Generated Ed25519 Keypair"
-  puts "============================"
-  puts ""
-  puts "Private Key (base58):"
-  puts private_key_base58
-  puts ""
-  puts "Public Key (base58):"
-  puts public_key_base58
-  puts ""
-  puts "⚠️  Keep the private key secret and secure!"
-  puts "Use the private key as your access token when setting up the agent."
-  puts ""
-  puts "Next steps:"
-  puts "  gentility setup #{private_key_base58}"
-  puts ""
-end
-
-def show_help
-  puts "Gentility AI Agent v#{VERSION}"
-  puts "==================#{("=" * VERSION.size)}"
-  puts ""
-  puts "USAGE:"
-  puts "    gentility <COMMAND> [OPTIONS]"
-  puts ""
-  puts "COMMANDS:"
-  puts "    auth                 Authenticate via your web browser"
-  puts "    run, start           Start the agent daemon"
-  puts "    status               Show agent configuration and service status"
-  puts "    generate             Generate a new Ed25519 keypair"
-  puts "    setup <token>        Initial setup with access token"
-  puts "    security <mode>      Configure security settings"
-  puts "    test-totp <code>     Test TOTP validation"
-  puts "    promiscuous <action> Configure promiscuous mode"
-  puts "    version, -v, --version  Show version information"
-  puts "    help, -h, --help     Show this help message"
-  puts ""
-  puts "AUTH OPTIONS:"
-  puts "    -e, --env <env>      Environment: prod (default) or dev"
-  puts "    --headless           Don't auto-open browser (display URL only)"
-  puts ""
-  puts "RUN OPTIONS:"
-  puts "    --token=<token>      Access token (required for run command)"
-  puts "    --debug              Enable debug logging"
-  puts "    -e, --env <env>      Environment: prod (default) or dev"
-  puts ""
-  puts "SECURITY MODES:"
-  puts "    totp [secret]        Enable TOTP authentication"
-  puts "    password [pass]      Enable password authentication"
-  puts "    none                 Disable security"
-  puts ""
-  puts "PROMISCUOUS ACTIONS:"
-  puts "    enable               Enable promiscuous mode"
-  puts "    disable              Disable promiscuous mode"
-  puts "    status               Show promiscuous status"
-  puts "    auth <password|totp> Set auth mode for promiscuous operations"
-  puts ""
-  puts "EXAMPLES:"
-  puts "    # Authenticate with OAuth (recommended)"
-  puts "    gentility auth"
-  puts "    gentility auth -e dev"
-  puts "    gentility auth --headless"
-  puts "    "
-  puts "    # Or generate keypair and setup manually"
-  puts "    gentility generate"
-  puts "    gentility setup <generated_private_key>"
-  puts "    "
-  puts "    # Configure security"
-  puts "    gentility security totp"
-  puts "    gentility security password mypass"
-  puts "    "
-  puts "    # Run agent"
-  puts "    gentility run"
-  puts "    gentility run -e dev --debug"
-  puts "    "
-  puts "    # Check status"
-  puts "    gentility status"
-  puts "    gentility version"
-  puts ""
-  puts "CONFIGURATION:"
-  puts "    Config file: #{get_config_path}"
-  puts "    Service: sudo systemctl start gentility"
-  puts ""
-end
-
-def main
-  # Show help if no arguments or help requested
-  if ARGV.empty? || ARGV[0].in?(["help", "--help", "-h"])
-    show_help
-    exit 0
-  end
-
-  # Show version if version requested
-  if ARGV[0].in?(["version", "--version", "-v"])
-    show_version
-    exit 0
-  end
-
-  # Check for generate command
-  if ARGV[0] == "generate"
-    generate_keypair
-    exit 0
-  end
-
-  # Check for setup command
-  if ARGV[0] == "setup"
-    if ARGV.size >= 2
-      setup_config(ARGV[1])
-      exit 0
-    else
-      puts "Usage: #{PROGRAM_NAME} setup <token>"
-      puts ""
-      puts "Initializes the agent with your Gentility AI access token and creates"
-      puts "the configuration file at #{get_config_path}"
-      puts ""
-      puts "Arguments:"
-      puts "  <token>    Your Gentility AI access token (starts with 'gnt_')"
-      puts ""
-      puts "Example:"
-      puts "  #{PROGRAM_NAME} setup gnt_1234567890abcdef"
-      puts ""
-      puts "After setup, start the service with:"
-      puts "  sudo systemctl start gentility"
-      exit 1
-    end
-  end
-
-  # Check for auth command
-  if ARGV[0] == "auth"
-    environment = "prod"
-    headless = false
-
-    # Parse auth options
-    i = 1
-    while i < ARGV.size
-      case ARGV[i]
-      when "-e", "--env"
-        if i + 1 < ARGV.size
-          environment = ARGV[i + 1]
-          i += 2
-        else
-          puts "Error: -e/--env requires an argument"
-          exit 1
-        end
-      when "--headless"
-        headless = true
-        i += 1
-      else
-        puts "Unknown option: #{ARGV[i]}"
-        puts "Usage: gentility auth [-e <env>] [--headless]"
-        exit 1
-      end
-    end
-
-    run_oauth_flow(environment, headless)
-    exit 0
-  end
-
-  # Check for security setup commands
-  if ARGV.size >= 1
-    case ARGV[0]
-    when "run", "start"
-      # Remove the run/start command and continue with normal parsing
-      ARGV.shift
-    when "status"
-      show_status
-      exit 0
-    when "security"
-      if ARGV.size >= 2
-        mode = ARGV[1]
-        value = ARGV.size >= 3 ? ARGV[2] : nil
-        setup_security(mode, value)
-      else
-        puts "Usage: #{PROGRAM_NAME} security <mode> [value]"
-        puts ""
-        puts "Security modes:"
-        puts "  totp [secret]     - Enable TOTP authentication (generates secret if not provided)"
-        puts "  password [pass]   - Enable password authentication (prompts if not provided)"
-        puts "  none             - Disable security"
-        puts ""
-        puts "Examples:"
-        puts "  #{PROGRAM_NAME} security totp"
-        puts "  #{PROGRAM_NAME} security password mySecretPass123"
-        puts "  #{PROGRAM_NAME} security none"
-        exit 1
-      end
-    when "test-totp"
-      if ARGV.size >= 2
-        code = ARGV[1]
-        test_totp_validation(code)
-      else
-        puts "Usage: #{PROGRAM_NAME} test-totp <6-digit-code>"
-        puts ""
-        puts "Tests TOTP validation with the configured secret."
-        puts "Get a code from your authenticator app and test it."
-        exit 1
-      end
-    when "promiscuous"
-      if ARGV.size >= 2
-        action = ARGV[1]
-        case action
-        when "enable"
-          set_promiscuous_mode(true)
-        when "disable"
-          set_promiscuous_mode(false)
-        when "status"
-          show_promiscuous_status
-        when "auth"
-          if ARGV.size >= 3
-            mode = ARGV[2]
-            set_promiscuous_auth_mode(mode)
-          else
-            puts "Usage: #{PROGRAM_NAME} promiscuous auth <password|totp>"
-            exit 1
-          end
-        else
-          puts "Usage: #{PROGRAM_NAME} promiscuous <enable|disable|status|auth>"
-          puts ""
-          puts "Commands:"
-          puts "  enable       - Enable promiscuous mode"
-          puts "  disable      - Disable promiscuous mode"
-          puts "  status       - Show current promiscuous mode status"
-          puts "  auth <mode>  - Set promiscuous auth mode (password or totp)"
-          exit 1
-        end
-      else
-        puts "Usage: #{PROGRAM_NAME} promiscuous <enable|disable|status|auth>"
-        exit 1
-      end
-    else
-      puts "Unknown command: #{ARGV[0]}"
-      puts ""
-      puts "Available commands: run, start, status, setup, security, test-totp, promiscuous, version, help"
-      puts "For detailed help: gentility help or gentility -h"
-      exit 1
-    end
-  end
-
-  access_key, server_url, nickname, environment, debug = parse_arguments
-
-  agent = GentilityAgent.new(access_key, server_url, nickname, environment, debug)
-
-  # Handle graceful shutdown
-  Signal::INT.trap do
-    puts ""
-    puts "Received SIGINT, shutting down gracefully..."
-    agent.stop
-    exit 0
-  end
-
-  Signal::TERM.trap do
-    puts ""
-    puts "Received SIGTERM, shutting down gracefully..."
-    agent.stop
-    exit 0
-  end
-
-  agent.start
 end
 
 # Only run main when not in spec mode
