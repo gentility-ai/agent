@@ -12,7 +12,7 @@ maintainer: "James Tippett - Gentility AI <james@gentility.ai>"
 description: |
   Gentility AI Agent Daemon
   A WebSocket-based agent that connects to Gentility AI servers to provide
-  remote system administration and automation capabilities.
+  remote function and automation capabilities.
 
   Features:
   - Real-time WebSocket communication with Gentility AI servers

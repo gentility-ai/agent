@@ -11,13 +11,11 @@ priority: "optional"
 maintainer: "James Tippett - Gentility AI <james@gentility.ai>"
 description: |
   Gentility AI Agent Daemon
-  A WebSocket-based agent that connects to Gentility AI servers to provide
-  remote system administration and automation capabilities.
+  An agent that connects to Gentility AI servers to provide
+  remote function and automation capabilities.
 
   Features:
-  - Real-time WebSocket communication with Gentility AI servers
-  - System information collection and reporting
-  - Remote command execution capabilities
+  - Remote command execution 
   - Database query execution (PostgreSQL and MySQL)
   - File read/write operations
   - Capability checking and validation

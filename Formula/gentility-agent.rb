@@ -1,5 +1,5 @@
 class GentilityAgent < Formula
-  desc "Secure WebSocket-based agent daemon for Gentility AI remote system administration"
+  desc "Daemon for Gentility AI remote access"
   homepage "https://gentility.ai"
   url "https://github.com/gentility-ai/agent.git",
       tag: "v1.1.1"
@@ -33,9 +33,9 @@ class GentilityAgent < Formula
   def caveats
     <<~EOS
       Quick Setup:
-        gentility setup YOUR_TOKEN_HERE
+        gentility auth
 
-      This will create #{etc}/gentility.yaml with your token.
+      This will log you in and associate this machine with your account.
 
       Then start as a service:
         brew services start gentility-agent

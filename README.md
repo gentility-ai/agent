@@ -1,16 +1,14 @@
 # Gentility AI Agent
 
-A secure, lightweight WebSocket-based agent daemon that connects your privileged environment to Gentility AI servers for intelligent system administration and automation.
+A lightweight daemon that connects your servers and computers to Gentility AI.
 
 ## Features
 
-- **Real-time WebSocket communication** with Gentility AI servers
-- **System information collection** and reporting
-- **Remote command execution** capabilities (with proper authorization)
+- **Simple and Auditable** trust, but verify
+- **Local credential capability** so your secrets stay with you
 - **Database query execution** (PostgreSQL and MySQL)
-- **File read/write operations** (secure, sandboxed)
-- **Capability checking** and validation
-- **Systemd integration** for reliable service management
+- **File read/write operations** (when enabled)
+- **Lockable** for ultimate peace of mind
 
 ## Supported Platforms
 
@@ -22,6 +20,8 @@ Tested on Ubuntu 20.04+, Debian 11+, CentOS 8+, and other modern Linux distribut
 macOS 10.15+ supported via Homebrew.
 
 ## Installation
+
+### Option 0: If you're in a hurry
 
 ### Option 1: APT Repository (Recommended)
 
@@ -46,7 +46,7 @@ Download and install the latest package directly:
 
 ```bash
 # Download the latest package
-wget https://github.com/gentility-ai/agent/releases/download/v1.0.32/gentility-agent_1.1.1_amd64.deb
+wget https://github.com/gentility-ai/agent/releases/download/v1.1.1/gentility-agent_1.1.1_amd64.deb
 
 # Install the package
 sudo dpkg -i gentility-agent_1.1.1_amd64.deb
@@ -93,28 +93,15 @@ After installation, configure the agent with your access token using the setup c
 
 ```bash
 # Quick setup (recommended) - Creates or updates configuration
-gentility setup YOUR_TOKEN_HERE
+gentility auth
 ```
 
-The `setup` command will:
+The `auth` command will:
 
 - Create a new config file if none exists
-- Update the token in an existing config file (preserving other settings)
-- Handle both commented and uncommented token lines
+- Take you to Gentility to associate this installation with an account
 
-Or manually edit the configuration:
-
-```bash
-# Manual setup
-sudo cp /etc/gentility.yaml.example /etc/gentility.yaml
-sudo nano /etc/gentility.yaml
-```
-
-**Required configuration:**
-
-```bash
-GENTILITY_TOKEN="your-access-token-here"
-```
+**How to run:**
 
 Start the service:
 
@@ -295,10 +282,8 @@ gentility start --token=YOUR_TOKEN_HERE --debug
 ### Setup Commands
 
 ```bash
-# Initial setup (creates /etc/gentility.yaml)
-sudo gentility setup YOUR_TOKEN_HERE
+sudo gentility auth
 
-# After setup, start without specifying token
 gentility run
 ```
 

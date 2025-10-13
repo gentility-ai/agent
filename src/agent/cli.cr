@@ -813,7 +813,7 @@ def show_status
   else
     puts "❌ Configuration: Not found"
     puts "   Expected: #{config_file}"
-    puts "   Run: sudo gentility setup YOUR_TOKEN"
+    puts "   Run: sudo gentility auth"
     puts ""
     return
   end
