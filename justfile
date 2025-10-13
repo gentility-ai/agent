@@ -43,8 +43,10 @@ build-remote-amd64:
     @echo "Building {{binary_name}} v{{version}} on remote Linux machine (core7) for AMD64..."
     @if [ -f .env ]; then \
         export $(cat .env | grep -v '^#' | xargs) && \
+        echo "Cleaning remote build directory..." && \
+        ssh ${CORE7_USER}@${CORE7_IP} "rm -rf /tmp/gentility-build/homebrew-agent" && \
         echo "Syncing source to ${CORE7_USER}@${CORE7_IP}..." && \
-        rsync -avz --exclude 'bin/' --exclude 'packages/' --exclude 'aptly-repo/' --exclude 'public/' --exclude '.git/' ./ ${CORE7_USER}@${CORE7_IP}:/tmp/gentility-build/ && \
+        rsync -avz --exclude-from=.rsyncignore ./ ${CORE7_USER}@${CORE7_IP}:/tmp/gentility-build/ && \
         echo "Building on core7..." && \
         ssh ${CORE7_USER}@${CORE7_IP} "cd /tmp/gentility-build && mkdir -p bin && shards install && crystal build src/agent.cr --release --static --no-debug -o bin/{{binary_name}}-{{version}}-linux-amd64" && \
         echo "Fetching AMD64 binary from core7..." && \
