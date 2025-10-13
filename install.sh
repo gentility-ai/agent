@@ -238,9 +238,10 @@ install_deb_direct() {
 # Main installation logic
 main() {
     echo ""
-    echo "╔════════════════════════════════════════╗"
-    echo "║   Gentility Agent Universal Installer  ║"
-    echo "╚════════════════════════════════════════╝"
+    echo "╔═══════════════════════════════╗"
+    echo "║   Gentility Agent  Installer  ║"
+    echo "╚═══════════════════════════════╝"
+    echo ""
     echo ""
 
     detect_platform

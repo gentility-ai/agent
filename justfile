@@ -384,12 +384,19 @@ release type="patch":
     echo "🍎 Building macOS ARM64 binary..."
     if ! just build-local-arm64; then
         echo "⚠️  macOS ARM64 build failed, continuing with Linux package only..."
-        macos_binary=""
+        macos_archive=""
         arch_label=""
     else
         macos_binary="bin/gentility-agent-${current_version}-darwin-arm64"
-        arch_label="macOS ARM64 Binary"
         echo "✅ macOS ARM64 binary built: ${macos_binary}"
+
+        # Create tar.gz archive for GitHub release
+        echo "📦 Creating macOS ARM64 archive..."
+        mkdir -p packages
+        macos_archive="packages/gentility-agent-${current_version}-darwin-arm64.tar.gz"
+        tar -czf "${macos_archive}" -C bin "gentility-agent-${current_version}-darwin-arm64"
+        arch_label="macOS ARM64 Binary (tar.gz)"
+        echo "✅ macOS ARM64 archive created: ${macos_archive}"
     fi
 
     echo ""
@@ -420,12 +427,12 @@ release type="patch":
 
     # Create GitHub release with assets
     echo "🚀 Creating GitHub release..."
-    if [ -n "$macos_binary" ] && [ -f "$macos_binary" ]; then
+    if [ -n "$macos_archive" ] && [ -f "$macos_archive" ]; then
         gh release create "v${current_version}" \
             --title "Release v${current_version}" \
             --generate-notes \
             "${linux_deb}#Linux AMD64 DEB Package" \
-            "${macos_binary}#${arch_label}"
+            "${macos_archive}#${arch_label}"
     else
         gh release create "v${current_version}" \
             --title "Release v${current_version}" \
@@ -570,17 +577,17 @@ update-formula-sha:
 
     echo "📝 Updating Homebrew formula SHA256 hashes for v${current_version}..."
 
-    # Update macOS ARM64 SHA256 (line 10)
-    darwin_arm64_bin="{{bin_dir}}/{{binary_name}}-${current_version}-darwin-arm64"
-    if [ -f "$darwin_arm64_bin" ]; then
-        darwin_arm64_sha=$(shasum -a 256 "$darwin_arm64_bin" | cut -d' ' -f1)
+    # Update macOS ARM64 SHA256 (line 10) - from tar.gz archive
+    darwin_arm64_archive="packages/{{binary_name}}-${current_version}-darwin-arm64.tar.gz"
+    if [ -f "$darwin_arm64_archive" ]; then
+        darwin_arm64_sha=$(shasum -a 256 "$darwin_arm64_archive" | cut -d' ' -f1)
         echo "  ✅ macOS ARM64: $darwin_arm64_sha"
         sed -i '' "10s/sha256 \".*\"/sha256 \"$darwin_arm64_sha\"/" "$formula_path"
     else
-        echo "  ⚠️  macOS ARM64 binary not found, skipping"
+        echo "  ⚠️  macOS ARM64 archive not found, skipping"
     fi
 
-    # Update Linux AMD64 SHA256 (line 27)
+    # Update Linux AMD64 SHA256 (line 27) - still from binary
     linux_amd64_bin="{{bin_dir}}/{{binary_name}}-${current_version}-linux-amd64"
     if [ -f "$linux_amd64_bin" ]; then
         linux_amd64_sha=$(shasum -a 256 "$linux_amd64_bin" | cut -d' ' -f1)
