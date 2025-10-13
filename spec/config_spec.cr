@@ -1,9 +1,9 @@
 require "./spec_helper"
 
 describe "Config Loading" do
-  describe "load_config_from_file" do
+  describe "AgentConfig.load_config_from_file" do
     it "returns nil for non-existent file" do
-      load_config_from_file("/nonexistent/file.yaml").should be_nil
+      AgentConfig.load_config_from_file("/nonexistent/file.yaml").should be_nil
     end
 
     it "parses valid YAML config file" do
@@ -18,7 +18,7 @@ describe "Config Loading" do
       temp_file = "/tmp/gentility-test-#{Random.rand(100000)}.yaml"
       File.write(temp_file, config_content)
 
-      config = load_config_from_file(temp_file)
+      config = AgentConfig.load_config_from_file(temp_file)
       config.should_not be_nil
 
       if config
@@ -44,7 +44,7 @@ describe "Config Loading" do
       temp_file = "/tmp/gentility-test-#{Random.rand(100000)}.yaml"
       File.write(temp_file, config_content)
 
-      config = load_config_from_file(temp_file)
+      config = AgentConfig.load_config_from_file(temp_file)
       config.should_not be_nil
 
       if config
@@ -74,7 +74,7 @@ describe "Config Loading" do
       temp_file = "/tmp/gentility-test-#{Random.rand(100000)}.yaml"
       File.write(temp_file, config_content)
 
-      config = load_config_from_file(temp_file)
+      config = AgentConfig.load_config_from_file(temp_file)
       config.should_not be_nil
 
       if config
@@ -96,7 +96,7 @@ describe "Config Loading" do
       temp_file = "/tmp/gentility-test-#{Random.rand(100000)}.yaml"
       File.write(temp_file, config_content)
 
-      config = load_config_from_file(temp_file)
+      config = AgentConfig.load_config_from_file(temp_file)
       config.should_not be_nil
 
       cleanup_test_file(temp_file)
@@ -113,7 +113,7 @@ describe "Config Loading" do
       temp_file = "/tmp/gentility-test-#{Random.rand(100000)}.yaml"
       File.write(temp_file, config_content)
 
-      config = load_config_from_file(temp_file)
+      config = AgentConfig.load_config_from_file(temp_file)
       config.should_not be_nil
 
       if config
@@ -130,7 +130,7 @@ describe "Config Loading" do
       temp_file = "/tmp/gentility-test-#{Random.rand(100000)}.yaml"
       File.write(temp_file, config_content)
 
-      config = load_config_from_file(temp_file)
+      config = AgentConfig.load_config_from_file(temp_file)
       # Should return nil on parse error
       config.should be_nil
 
