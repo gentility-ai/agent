@@ -46,10 +46,10 @@ Download and install the latest package directly:
 
 ```bash
 # Download the latest package
-wget https://github.com/gentility-ai/agent/releases/download/v1.1.1/gentility-agent_1.1.6_amd64.deb
+wget https://github.com/gentility-ai/agent/releases/download/v1.1.1/gentility-agent_1.1.7_amd64.deb
 
 # Install the package
-sudo dpkg -i gentility-agent_1.1.6_amd64.deb
+sudo dpkg -i gentility-agent_1.1.7_amd64.deb
 
 # Install any missing dependencies
 sudo apt-get install -f
