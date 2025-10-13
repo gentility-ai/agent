@@ -1,0 +1,16 @@
+bin/
+packages/
+aptly-repo/
+public/
+.git/
+homebrew-agent/
+homebrew-agent
+.gitignore
+.rsyncignore
+*.deb
+*.rpm
+*.tar.gz
+.DS_Store
+.env
+.env.*
+node_modules/
