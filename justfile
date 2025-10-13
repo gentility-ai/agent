@@ -390,11 +390,13 @@ release type="patch":
         macos_binary="bin/gentility-agent-${current_version}-darwin-arm64"
         echo "✅ macOS ARM64 binary built: ${macos_binary}"
 
-        # Create tar.gz archive for GitHub release
+        # Create tar.gz archive for GitHub release (include config example)
         echo "📦 Creating macOS ARM64 archive..."
         mkdir -p packages
         macos_archive="packages/gentility-agent-${current_version}-darwin-arm64.tar.gz"
-        tar -czf "${macos_archive}" -C bin "gentility-agent-${current_version}-darwin-arm64"
+        tar -czf "${macos_archive}" \
+            -C bin "gentility-agent-${current_version}-darwin-arm64" \
+            -C .. gentility.yaml.example
         arch_label="macOS ARM64 Binary (tar.gz)"
         echo "✅ macOS ARM64 archive created: ${macos_archive}"
     fi
