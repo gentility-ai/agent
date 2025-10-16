@@ -340,8 +340,8 @@ class GentilityAgent
     case msg["type"]?.try(&.to_s)
     when "welcome"
       puts "✅ Connected to server!"
-      server_target_id = msg["server_target_id"]?.try(&.to_s)
-      puts "Server Target ID: #{server_target_id}" if server_target_id
+      machine_id = msg["machine_id"]?.try(&.to_s)
+      puts "Machine ID: #{machine_id}" if machine_id
     when "error"
       # Handle error messages from server
       error_code = msg["error"]?.try(&.to_s)

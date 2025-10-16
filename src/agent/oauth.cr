@@ -86,10 +86,17 @@ module OAuth
   class Authenticator
     @config : Config
     @pkce : PKCE
+    @debug : Bool
 
-    def initialize(environment : String = "prod")
+    def initialize(environment : String = "prod", @debug : Bool = false)
       @config = Config.new(environment)
       @pkce = PKCE.new
+    end
+
+    private def debug_log(message : String)
+      if @debug
+        puts "[DEBUG] #{Time.local.to_s("%Y-%m-%d %H:%M:%S")} #{message}"
+      end
     end
 
     # Build authorization URL
@@ -127,7 +134,13 @@ module OAuth
         "Content-Type" => "application/x-www-form-urlencoded",
       }
 
+      debug_log("POST #{@config.token_endpoint}")
+      debug_log("Request body: grant_type=authorization_code&code=#{code[0...10]}...&client_id=#{@config.client_id}")
+
       response = client.post(@config.token_endpoint, headers: headers, body: body)
+
+      debug_log("Response status: #{response.status_code}")
+      debug_log("Response body: #{response.body[0...100]}...")
 
       if response.status_code == 200
         TokenResponse.from_json(response.body)
@@ -172,7 +185,13 @@ module OAuth
         "Content-Type" => "application/x-www-form-urlencoded",
       }
 
+      debug_log("POST #{@config.device_code_endpoint}")
+      debug_log("Request body: client_id=#{@config.client_id}&scope=#{@config.scopes}")
+
       response = client.post(@config.device_code_endpoint, headers: headers, body: body)
+
+      debug_log("Response status: #{response.status_code}")
+      debug_log("Response body: #{response.body}")
 
       if response.status_code == 200
         DeviceCodeResponse.from_json(response.body)
@@ -195,12 +214,21 @@ module OAuth
         "Content-Type" => "application/x-www-form-urlencoded",
       }
 
+      poll_count = 0
       loop do
+        poll_count += 1
+        debug_log("Polling for token (attempt ##{poll_count})...")
+        debug_log("POST #{@config.token_endpoint}")
+
         response = client.post(@config.token_endpoint, headers: headers, body: body)
+
+        debug_log("Response status: #{response.status_code}")
+        debug_log("Response body: #{response.body[0...150]}...")
 
         case response.status_code
         when 200
           # Success!
+          debug_log("Token received successfully!")
           return TokenResponse.from_json(response.body)
         when 400
           # Check error type
@@ -210,9 +238,11 @@ module OAuth
           case error
           when "authorization_pending"
             # User hasn't authorized yet, keep polling
+            debug_log("Authorization pending, waiting #{interval} seconds before next poll...")
             sleep interval.seconds
           when "slow_down"
             # Server wants us to slow down
+            debug_log("Server requested slow_down, waiting #{interval + 5} seconds...")
             sleep (interval + 5).seconds
           when "expired_token"
             raise "Device code expired. Please try again."
@@ -430,16 +460,18 @@ module OAuth
 
   # Main OAuth flow coordinator
   class Flow
-    def self.authenticate(environment : String = "prod", headless : Bool = false) : TokenResponse
-      auth = Authenticator.new(environment)
+    def self.authenticate(environment : String = "prod", headless : Bool = false, debug : Bool = false) : TokenResponse
+      auth = Authenticator.new(environment, debug)
       callback_server = CallbackServer.new
 
       # Start callback server
       port = callback_server.start
       puts "📡 Started callback server on http://localhost:#{port}"
+      puts "[DEBUG] Callback server listening on port #{port}" if debug
 
       # Build authorization URL
       auth_url = auth.build_authorize_url(port)
+      puts "[DEBUG] Authorization URL: #{auth_url}" if debug
 
       if headless
         # Headless mode: display URL for manual opening
@@ -475,12 +507,14 @@ module OAuth
       begin
         code = callback_server.wait_for_callback
         puts "✅ Authorization code received"
+        puts "[DEBUG] Authorization code: #{code[0...10]}..." if debug
 
         # Exchange code for tokens
         puts "🔄 Exchanging code for access token..."
         tokens = auth.exchange_code(code, port)
 
         puts "✅ Authentication successful!"
+        puts "[DEBUG] Access token received: #{tokens.access_token[0...20]}..." if debug
         tokens
       ensure
         callback_server.stop
@@ -488,14 +522,16 @@ module OAuth
     end
 
     # Device Code Flow - for SSH/remote scenarios
-    def self.authenticate_device(environment : String = "prod") : TokenResponse
-      auth = Authenticator.new(environment)
+    def self.authenticate_device(environment : String = "prod", debug : Bool = false) : TokenResponse
+      auth = Authenticator.new(environment, debug)
 
       # Step 1: Request device code
       puts "🔐 Starting device authentication..."
       puts ""
 
       device_response = auth.request_device_code
+      puts "[DEBUG] Device code: #{device_response.device_code[0...20]}..." if debug
+      puts "[DEBUG] User code: #{device_response.user_code}" if debug
 
       # Step 2: Display instructions to user
       puts "📱 Please authorize this device:"
@@ -516,9 +552,11 @@ module OAuth
 
       # Step 3: Poll for token
       interval = device_response.interval || 5
+      puts "[DEBUG] Polling interval: #{interval} seconds" if debug
       tokens = auth.poll_for_token(device_response.device_code, interval)
 
       puts "✅ Authentication successful!"
+      puts "[DEBUG] Access token received: #{tokens.access_token[0...20]}..." if debug
       tokens
     end
 

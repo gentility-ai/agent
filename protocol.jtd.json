@@ -13,15 +13,15 @@
       },
       "required": ["type"]
     },
-    
+
     "WelcomeMessage": {
       "properties": {
         "type": { "enum": ["welcome"] },
-        "server_target_id": { "type": "string" }
+        "machine_id": { "type": "string" }
       },
       "required": ["type"]
     },
-    
+
     "PingMessage": {
       "properties": {
         "type": { "enum": ["ping"] },
@@ -29,7 +29,7 @@
       },
       "required": ["type"]
     },
-    
+
     "PongMessage": {
       "properties": {
         "type": { "enum": ["pong"] },
@@ -40,9 +40,17 @@
         "time_remaining": { "type": "int32" },
         "extendable": { "type": "boolean" }
       },
-      "required": ["type", "timestamp", "security_enabled", "security_mode", "active", "time_remaining", "extendable"]
+      "required": [
+        "type",
+        "timestamp",
+        "security_enabled",
+        "security_mode",
+        "active",
+        "time_remaining",
+        "extendable"
+      ]
     },
-    
+
     "CommandMessage": {
       "properties": {
         "type": { "enum": ["command"] },
@@ -52,7 +60,7 @@
       },
       "required": ["type", "request_id", "command"]
     },
-    
+
     "ResponseMessage": {
       "properties": {
         "type": { "enum": ["response"] },
@@ -61,7 +69,7 @@
       },
       "required": ["type", "request_id", "result"]
     },
-    
+
     "ErrorMessage": {
       "properties": {
         "type": { "enum": ["error"] },
@@ -70,7 +78,7 @@
       },
       "required": ["type", "request_id", "error"]
     },
-    
+
     "StatusMessage": {
       "properties": {
         "type": { "enum": ["status"] },
@@ -89,12 +97,25 @@
             "time_remaining": { "type": "int32" },
             "extendable": { "type": "boolean" }
           },
-          "required": ["agent_version", "hostname", "local_ip", "environment", "nickname", "uptime", "timestamp", "security_enabled", "security_mode", "active", "time_remaining", "extendable"]
+          "required": [
+            "agent_version",
+            "hostname",
+            "local_ip",
+            "environment",
+            "nickname",
+            "uptime",
+            "timestamp",
+            "security_enabled",
+            "security_mode",
+            "active",
+            "time_remaining",
+            "extendable"
+          ]
         }
       },
       "required": ["type", "status"]
     },
-    
+
     "CommandParams": {
       "discriminator": "command_type",
       "mapping": {
@@ -199,7 +220,7 @@
         }
       }
     },
-    
+
     "CommandResults": {
       "discriminator": "result_type",
       "mapping": {
@@ -233,7 +254,12 @@
             "total_available": { "type": "int32" },
             "timestamp": { "type": "float64" }
           },
-          "required": ["available_capabilities", "total_checked", "total_available", "timestamp"]
+          "required": [
+            "available_capabilities",
+            "total_checked",
+            "total_available",
+            "timestamp"
+          ]
         },
         "shell_execution": {
           "properties": {
@@ -311,7 +337,7 @@
       }
     }
   },
-  
+
   "discriminator": "type",
   "mapping": {
     "welcome": { "ref": "WelcomeMessage" },

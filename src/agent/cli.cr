@@ -378,7 +378,7 @@ def is_ssh_session? : Bool
   ENV.has_key?("SSH_CONNECTION") || ENV.has_key?("SSH_CLIENT") || ENV.has_key?("SSH_TTY")
 end
 
-def run_oauth_flow(environment : String, headless : Bool, org_id : String?, env_name : String?, nickname : String?)
+def run_oauth_flow(environment : String, headless : Bool, debug : Bool, org_id : String?, env_name : String?, nickname : String?)
   # Auto-detect SSH/remote and use appropriate flow
   use_device_flow = is_ssh_session?
 
@@ -389,14 +389,15 @@ def run_oauth_flow(environment : String, headless : Bool, org_id : String?, env_
 
   puts "🔐 Starting OAuth authentication flow..."
   puts "Environment: #{environment}"
+  puts "Debug mode: #{debug ? "enabled" : "disabled"}" if debug
   puts ""
 
   begin
     # Step 1: Get OAuth token (choose flow based on environment)
     tokens = if use_device_flow
-               OAuth::Flow.authenticate_device(environment)
+               OAuth::Flow.authenticate_device(environment, debug)
              else
-               OAuth::Flow.authenticate(environment, headless)
+               OAuth::Flow.authenticate(environment, headless, debug)
              end
 
     oauth_token = tokens.access_token
@@ -416,19 +417,20 @@ def run_oauth_flow(environment : String, headless : Bool, org_id : String?, env_
                  end
 
     # Create a temporary agent just to provision the key
-    provision_machine_key(oauth_token, server_url, environment, org_id, env_name, nickname)
+    provision_machine_key(oauth_token, server_url, environment, debug, org_id, env_name, nickname)
   rescue ex : Exception
     puts ""
     puts "❌ OAuth authentication failed: #{ex.message}"
+    puts ex.backtrace.join("\n") if debug
     exit 1
   end
 end
 
-def provision_machine_key(oauth_token : String, server_url : String, environment : String, org_id : String?, env_name : String?, nickname : String?)
+def provision_machine_key(oauth_token : String, server_url : String, environment : String, debug : Bool, org_id : String?, env_name : String?, nickname : String?)
   puts ""
 
   # Create provisioning context
-  provisioner = AgentProvisioner.new(oauth_token, server_url, environment, org_id, env_name, nickname)
+  provisioner = AgentProvisioner.new(oauth_token, server_url, environment, debug, org_id, env_name, nickname)
 
   begin
     provisioner.run
@@ -445,7 +447,7 @@ def provision_machine_key(oauth_token : String, server_url : String, environment
   rescue ex : Exception
     puts ""
     puts "❌ Provisioning failed: #{ex.message}"
-    puts ex.backtrace.join("\n") if ENV["DEBUG"]?
+    puts ex.backtrace.join("\n") if debug
     exit 1
   end
 end
@@ -455,6 +457,7 @@ class AgentProvisioner
   @oauth_token : String
   @server_url : String
   @environment : String
+  @debug : Bool
   @org_id : String?
   @env_name : String?
   @nickname : String?
@@ -462,8 +465,14 @@ class AgentProvisioner
   @provision_channel : Channel(MessagePack::Any)
   @complete : Bool = false
 
-  def initialize(@oauth_token, @server_url, @environment, @org_id, @env_name, @nickname)
+  def initialize(@oauth_token, @server_url, @environment, @debug, @org_id, @env_name, @nickname)
     @provision_channel = Channel(MessagePack::Any).new
+  end
+
+  private def debug_log(message : String)
+    if @debug
+      puts "[DEBUG] #{Time.local.to_s("%Y-%m-%d %H:%M:%S")} #{message}"
+    end
   end
 
   def run
@@ -557,20 +566,25 @@ class AgentProvisioner
       end
     )
 
+    debug_log("Connecting to WebSocket: #{ws_uri.host}:#{ws_uri.port}#{ws_uri.path}")
+
     @websocket = HTTP::WebSocket.new(ws_uri)
 
     # Set up binary message handler
     @websocket.not_nil!.on_binary do |binary|
       begin
+        debug_log("← Received binary message (#{binary.size} bytes)")
         data = MessagePack.unpack(binary)
+        debug_log("← Unpacked: #{data.inspect}")
         @provision_channel.send(data)
       rescue ex
         puts "Error parsing message: #{ex.message}"
+        debug_log("← Parse error: #{ex.message}")
       end
     end
 
     @websocket.not_nil!.on_close do |code, message|
-      # Connection closed
+      debug_log("WebSocket closed: #{code} - #{message}")
     end
 
     # Start WebSocket in background
@@ -579,6 +593,7 @@ class AgentProvisioner
     end
 
     sleep 1.second # Give connection time to establish
+    debug_log("WebSocket connection established")
   end
 
   private def wait_for_message(timeout : Time::Span) : MessagePack::Any
@@ -594,7 +609,9 @@ class AgentProvisioner
     ws = @websocket
     return unless ws && !ws.closed?
 
+    debug_log("→ Sending: #{data.inspect}")
     packed = data.to_msgpack
+    debug_log("→ Packed message (#{packed.size} bytes)")
     ws.send(packed)
   end
 
@@ -917,7 +934,7 @@ def show_help
   puts "==================#{("=" * VERSION.size)}"
   puts ""
   puts "USAGE:"
-  puts "    gentility <COMMAND> [OPTIONS]"
+  puts "    gentility [--debug] <COMMAND> [OPTIONS]"
   puts ""
   puts "COMMANDS:"
   puts "    auth                 Authenticate and provision machine key (required first step)"
@@ -931,6 +948,9 @@ def show_help
   puts "    version, -v, --version  Show version information"
   puts "    help, -h, --help     Show this help message"
   puts ""
+  puts "GLOBAL OPTIONS:"
+  puts "    --debug              Enable verbose debug logging (works with any command)"
+  puts ""
   puts "AUTH OPTIONS:"
   puts "    -e, --env <env>          OAuth environment: prod (default) or dev"
   puts "    --headless               Don't auto-open browser (display URL only)"
@@ -940,7 +960,6 @@ def show_help
   puts ""
   puts "RUN OPTIONS:"
   puts "    --token=<token>      Access token (required for run command)"
-  puts "    --debug              Enable debug logging"
   puts "    -e, --env <env>      Environment: prod (default) or dev"
   puts ""
   puts "SECURITY MODES:"
@@ -959,6 +978,7 @@ def show_help
   puts "    gentility auth"
   puts "    gentility auth -e dev                    # For development OAuth server"
   puts "    gentility auth --headless                # Server/headless mode (shows URL)"
+  puts "    gentility --debug auth                   # Debug mode for troubleshooting"
   puts "    "
   puts "    # Non-interactive authentication (for automation)"
   puts "    gentility auth --org <org-id> --environment production --nickname web-1"
@@ -966,6 +986,7 @@ def show_help
   puts "    # Step 2: Run agent"
   puts "    gentility run"
   puts "    gentility run -e dev --debug             # Development with debug logging"
+  puts "    gentility auth --debug -e dev            # Debug can go anywhere in command"
   puts "    "
   puts "    # Configure security (optional)"
   puts "    gentility security totp"
@@ -986,6 +1007,10 @@ def show_help
 end
 
 def main
+  # Parse global --debug flag first (works with any command)
+  debug = ARGV.includes?("--debug")
+  ARGV.delete("--debug")
+
   # Show help if no arguments or help requested
   if ARGV.empty? || ARGV[0].in?(["help", "--help", "-h"])
     show_help
@@ -1076,12 +1101,12 @@ def main
         end
       else
         puts "Unknown option: #{ARGV[i]}"
-        puts "Usage: gentility auth [-e <env>] [--headless] [--org <id>] [--environment <name>] [--nickname <name>]"
+        puts "Usage: gentility auth [-e <env>] [--headless] [--debug] [--org <id>] [--environment <name>] [--nickname <name>]"
         exit 1
       end
     end
 
-    run_oauth_flow(environment, headless, org_id, env_name, nickname)
+    run_oauth_flow(environment, headless, debug, org_id, env_name, nickname)
     exit 0
   end
 
