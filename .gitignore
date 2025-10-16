@@ -66,3 +66,6 @@ notes/
 
 # build artefact
 agent
+
+# Worktrees
+.worktrees/
