@@ -247,6 +247,14 @@ sudo ufw status
 - Configuration files are protected with appropriate permissions
 - No sensitive data is stored in logs
 
+### Rate Limiting
+
+The agent supports password and TOTP authentication with built-in rate limiting to prevent brute-force attacks.
+
+After 5 failed authentication attempts, the agent enters lockout mode. Each failed attempt enforces an exponential backoff delay (30s, 60s, 120s, 240s).
+
+See [docs/SECURITY_RATE_LIMITING.md](docs/SECURITY_RATE_LIMITING.md) for details.
+
 ## Support
 
 For support, issues, or feature requests:
