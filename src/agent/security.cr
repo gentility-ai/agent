@@ -13,7 +13,22 @@ module Security
   @@promiscuous_enabled : Bool = true
   @@promiscuous_auth_mode : String = "password"
 
-  def self.configure(mode : String, password : String?, totp_secret : String?, timeout : Int32, extendable : Bool, promiscuous_enabled : Bool = true, promiscuous_auth_mode : String = "password")
+  # Rate limiting state (in-memory)
+  @@failed_attempts : Int32 = 0
+  @@last_attempt_time : Time? = nil
+  @@next_attempt_allowed : Time? = nil
+
+  # Lockout state (persisted)
+  @@locked_out : Bool = false
+  @@lockout_until : Time? = nil
+
+  # Rate limiting config
+  @@rate_limiting_enabled : Bool = true
+  @@max_attempts : Int32 = 5
+  @@lockout_mode : String = "temporary"
+  @@lockout_duration : Int32 = 900
+
+  def self.configure(mode : String, password : String?, totp_secret : String?, timeout : Int32, extendable : Bool, promiscuous_enabled : Bool = true, promiscuous_auth_mode : String = "password", rate_limiting_enabled : Bool = true, max_attempts : Int32 = 5, lockout_mode : String = "temporary", lockout_duration : Int32 = 900)
     @@mode = mode
     @@password = password
     @@totp_secret = totp_secret
@@ -21,6 +36,10 @@ module Security
     @@extendable = extendable
     @@promiscuous_enabled = promiscuous_enabled
     @@promiscuous_auth_mode = promiscuous_auth_mode
+    @@rate_limiting_enabled = rate_limiting_enabled
+    @@max_attempts = max_attempts
+    @@lockout_mode = lockout_mode
+    @@lockout_duration = lockout_duration
   end
 
   def self.mode

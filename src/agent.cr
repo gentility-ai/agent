@@ -113,7 +113,15 @@ class GentilityAgent
     promiscuous_auth_mode = security_config["promiscuous_auth_mode"]?.try(&.as_s?) ||
                             security_config["PROMISCUOUS_AUTH_MODE"]?.try(&.as_s?) || "password"
 
-    Security.configure(mode, password, totp_secret, timeout, extendable, promiscuous_enabled, promiscuous_auth_mode)
+    # Load rate limiting config (nested under security.rate_limiting or flat)
+    rate_limiting_config = security_config["rate_limiting"]? || security_config
+
+    rate_limiting_enabled = rate_limiting_config["enabled"]?.try(&.as_bool?) || true
+    max_attempts = rate_limiting_config["max_attempts"]?.try(&.as_i?) || 5
+    lockout_mode = rate_limiting_config["lockout_mode"]?.try(&.as_s?) || "temporary"
+    lockout_duration = rate_limiting_config["lockout_duration"]?.try(&.as_i?) || 900
+
+    Security.configure(mode, password, totp_secret, timeout, extendable, promiscuous_enabled, promiscuous_auth_mode, rate_limiting_enabled, max_attempts, lockout_mode, lockout_duration)
   end
 
   private def parse_boolean_from_any(value : YAML::Any) : Bool
@@ -875,9 +883,10 @@ class GentilityAgent
     return unless websocket && !websocket.closed?
 
     begin
-      packed = data.to_msgpack
-      debug_log("→ Packed message (#{packed.size} bytes)")
-      websocket.send(packed)
+      websocket.stream(binary: true) do |io|
+        debug_log("→ Sending binary message")
+        data.to_msgpack(io)
+      end
     rescue ex : Exception
       puts "Error sending message: #{ex.message}"
       debug_log("→ Send error: #{ex.message}")

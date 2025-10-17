@@ -44,6 +44,13 @@ security:
   # Promiscuous authentication mode: password or totp (default: password)
   # promiscuous_auth_mode: password
 
+  # Rate limiting and lockout protection (enabled by default)
+  rate_limiting:
+    # enabled: true                    # Enable/disable (default: true)
+    # max_attempts: 5                  # Failed attempts before lockout (default: 5)
+    # lockout_mode: temporary          # "temporary" or "permanent" (default: temporary)
+    # lockout_duration: 900            # Lockout duration in seconds (default: 900 = 15min)
+
 # Encrypted database credentials (managed by server via store_credentials command)
 # Database credentials are stored here encrypted with your agent's Ed25519 key
 # Format: db-target-uuid: base64_encrypted_credentials
