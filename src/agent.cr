@@ -55,6 +55,7 @@ class GentilityAgent
   @nickname : String
   @environment : String
   @running : Bool = false
+  @graceful_shutdown : Bool = false
   @ping_fiber : Fiber?
   @debug : Bool = false
   @signing_key : Ed25519::SigningKey?
@@ -290,6 +291,7 @@ class GentilityAgent
   def stop
     puts "Stopping agent..."
     @running = false
+    @graceful_shutdown = true
 
     # The ping fiber will stop naturally when @running becomes false
 
@@ -352,7 +354,9 @@ class GentilityAgent
     end
 
     @websocket.not_nil!.on_close do |close_code, message|
-      puts "WebSocket closed: #{close_code} - #{message}"
+      unless @graceful_shutdown
+        puts "WebSocket closed: #{close_code} - #{message}"
+      end
       @websocket = nil
     end
 
