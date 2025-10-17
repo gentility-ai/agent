@@ -182,4 +182,36 @@ describe Security do
       result.size.should eq 2
     end
   end
+
+  describe "Lockout persistence" do
+    it "persists lockout state" do
+      Security.configure("password", "test", nil, 1800, true, true, "password", true, 3, "temporary", 900)
+
+      # Trigger lockout - need to wait for backoffs or just call lock then restore
+      # Simpler: just lock it out directly
+      Security.restore_lockout(Time.utc + 900.seconds)
+
+      # Get persisted data
+      lockout_data = Security.persist_lockout
+      lockout_data["locked_out"].should be_true
+      lockout_data["lockout_until"].should_not be_nil
+    end
+
+    it "restores lockout state" do
+      future_time = Time.utc + 900.seconds
+      Security.restore_lockout(future_time)
+
+      Security.locked_out?.should be_true
+      Security.lockout_until.should eq future_time
+    end
+
+    it "clears expired temporary lockout" do
+      Security.configure("password", "test", nil, 1800, true, true, "password", true, 3, "temporary", 900)
+      past_time = Time.utc - 1.second
+      Security.restore_lockout(past_time)
+
+      Security.unlock("test")
+      Security.locked_out?.should be_false
+    end
+  end
 end
