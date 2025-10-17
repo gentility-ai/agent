@@ -85,7 +85,7 @@ class GentilityAgent
   private def load_security_config
     config_file = AgentConfig.get_config_path
     config = AgentConfig.load_config_from_file(config_file)
-    return Security.configure("none", nil, nil, 1800, true, true, "password") unless config
+    return Security.configure("none", nil, nil, 1800, true, true, "password", true, 5, "temporary", 900) unless config
 
     # Support both YAML security section and legacy flat keys
     security_config = config["security"]? || config
