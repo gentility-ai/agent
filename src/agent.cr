@@ -122,6 +122,15 @@ class GentilityAgent
     lockout_duration = rate_limiting_config["lockout_duration"]?.try(&.as_i?) || 900
 
     Security.configure(mode, password, totp_secret, timeout, extendable, promiscuous_enabled, promiscuous_auth_mode, rate_limiting_enabled, max_attempts, lockout_mode, lockout_duration)
+
+    # Load persisted lockout state if exists
+    locked_out = rate_limiting_config["locked_out"]?.try(&.as_bool?) || false
+    lockout_until_ts = rate_limiting_config["lockout_until"]?.try(&.as_f?)
+
+    if locked_out
+      lockout_until = lockout_until_ts ? Time.unix(lockout_until_ts.to_i64) : nil
+      Security.restore_lockout(lockout_until)
+    end
   end
 
   private def parse_boolean_from_any(value : YAML::Any) : Bool
@@ -146,7 +155,7 @@ class GentilityAgent
     end
   end
 
-  private def save_security_config(mode : String, password : String?, totp_secret : String?, timeout : Int32, extendable : Bool)
+  private def save_security_config(mode : String, password : String?, totp_secret : String?, timeout : Int32, extendable : Bool, rate_limiting_lockout : Hash(String, Bool | Float64 | Nil)? = nil)
     config_file = AgentConfig.get_config_path
 
     # Read and parse existing YAML config
@@ -166,6 +175,16 @@ class GentilityAgent
     security_hash[YAML::Any.new("totp_secret")] = YAML::Any.new(totp_secret) if totp_secret
     security_hash[YAML::Any.new("unlock_timeout")] = YAML::Any.new(timeout.to_i64)
     security_hash[YAML::Any.new("extendable")] = YAML::Any.new(extendable)
+
+    # Add rate_limiting section if lockout data provided
+    if rate_limiting_lockout
+      rl_hash = {} of YAML::Any => YAML::Any
+      rl_hash[YAML::Any.new("locked_out")] = YAML::Any.new(rate_limiting_lockout["locked_out"].as(Bool))
+      if lockout_until = rate_limiting_lockout["lockout_until"]
+        rl_hash[YAML::Any.new("lockout_until")] = YAML::Any.new(lockout_until.as(Float64))
+      end
+      security_hash[YAML::Any.new("rate_limiting")] = YAML::Any.new(rl_hash)
+    end
 
     config_hash[YAML::Any.new("security")] = YAML::Any.new(security_hash)
 

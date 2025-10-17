@@ -42,6 +42,19 @@ module Security
     @@lockout_duration = lockout_duration
   end
 
+  def self.restore_lockout(lockout_until : Time?)
+    @@locked_out = true
+    @@lockout_until = lockout_until
+  end
+
+  def self.persist_lockout
+    # Returns hash to be saved to config
+    {
+      "locked_out" => @@locked_out,
+      "lockout_until" => @@lockout_until ? @@lockout_until.not_nil!.to_unix_f : nil,
+    }
+  end
+
   def self.mode
     @@mode
   end
