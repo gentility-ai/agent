@@ -59,6 +59,34 @@ module Security
     @@mode
   end
 
+  def self.can_attempt? : Bool
+    return true unless @@rate_limiting_enabled
+    return false if @@locked_out
+
+    return true unless @@next_attempt_allowed
+    Time.utc >= @@next_attempt_allowed.not_nil!
+  end
+
+  def self.time_until_next_attempt : Int32
+    return 0 unless @@next_attempt_allowed
+    remaining = (@@next_attempt_allowed.not_nil! - Time.utc).total_seconds.ceil.to_i
+    [remaining, 0].max
+  end
+
+  def self.locked_out? : Bool
+    @@locked_out
+  end
+
+  def self.failed_attempt_count : Int32
+    @@failed_attempts
+  end
+
+  private def self.calculate_backoff_seconds(attempt : Int32) : Int32
+    # 30s, 60s, 120s, 240s (or 1s, 2s, 4s, 8s in test mode)
+    base = ENV.fetch("RATE_LIMIT_TEST_MODE", "false") == "true" ? 1 : 30
+    (base * (2 ** (attempt - 1))).to_i
+  end
+
   def self.unlocked?
     return true if @@mode == "none"
 
@@ -85,23 +113,78 @@ module Security
   def self.unlock(password_or_totp : String) : Bool
     return true if @@mode == "none"
 
-    success = case @@mode
-              when "password"
-                @@password && password_or_totp == @@password
-              when "totp"
-                validate_totp(password_or_totp)
-              else
-                false
-              end
-
-    if success
+    # Check if locked out
+    if @@locked_out
       now = Time.utc
-      @@active = true
-      @@unlock_time = now
-      @@initial_unlock_time = now unless @@initial_unlock_time
+      if @@lockout_until && now >= @@lockout_until.not_nil!
+        # Temporary lockout expired
+        clear_lockout
+      else
+        # Still locked (temporary or permanent)
+        return false
+      end
     end
 
-    !!success
+    # Check if backoff in effect
+    if @@rate_limiting_enabled && @@next_attempt_allowed
+      return false if Time.utc < @@next_attempt_allowed.not_nil!
+    end
+
+    # Validate credentials
+    success = validate_credential(password_or_totp)
+
+    if success
+      reset_rate_limiting
+      @@active = true
+      @@unlock_time = Time.utc
+      @@initial_unlock_time ||= Time.utc
+      true
+    else
+      handle_failed_attempt if @@rate_limiting_enabled
+      false
+    end
+  end
+
+  private def self.validate_credential(password_or_totp : String) : Bool
+    case @@mode
+    when "password"
+      !!(@@password && password_or_totp == @@password)
+    when "totp"
+      validate_totp(password_or_totp)
+    else
+      false
+    end
+  end
+
+  private def self.handle_failed_attempt
+    @@failed_attempts += 1
+    @@last_attempt_time = Time.utc
+
+    if @@failed_attempts >= @@max_attempts
+      # Trigger lockout
+      @@locked_out = true
+      if @@lockout_mode == "temporary"
+        @@lockout_until = Time.utc + @@lockout_duration.seconds
+      else
+        @@lockout_until = nil # Permanent
+      end
+    else
+      # Set backoff
+      backoff = calculate_backoff_seconds(@@failed_attempts)
+      @@next_attempt_allowed = Time.utc + backoff.seconds
+    end
+  end
+
+  private def self.reset_rate_limiting
+    @@failed_attempts = 0
+    @@last_attempt_time = nil
+    @@next_attempt_allowed = nil
+  end
+
+  def self.clear_lockout
+    @@locked_out = false
+    @@lockout_until = nil
+    reset_rate_limiting
   end
 
   def self.extend_unlock
@@ -113,6 +196,8 @@ module Security
     @@active = false
     @@unlock_time = nil
     @@initial_unlock_time = nil
+    # Reset rate limiting state when locking
+    clear_lockout
   end
 
   def self.time_remaining : Int32
