@@ -180,8 +180,10 @@ class GentilityAgent
     if rate_limiting_lockout
       rl_hash = {} of YAML::Any => YAML::Any
       rl_hash[YAML::Any.new("locked_out")] = YAML::Any.new(rate_limiting_lockout["locked_out"].as(Bool))
-      if lockout_until = rate_limiting_lockout["lockout_until"]
-        rl_hash[YAML::Any.new("lockout_until")] = YAML::Any.new(lockout_until.as(Float64))
+      if lockout_until_val = rate_limiting_lockout["lockout_until"]
+        if lockout_until_val.is_a?(Float64)
+          rl_hash[YAML::Any.new("lockout_until")] = YAML::Any.new(lockout_until_val)
+        end
       end
       security_hash[YAML::Any.new("rate_limiting")] = YAML::Any.new(rl_hash)
     end
@@ -193,6 +195,17 @@ class GentilityAgent
     File.chmod(config_file, 0o600)
   rescue ex : Exception
     puts "Warning: Could not save security configuration to file: #{ex.message}"
+  end
+
+  private def save_security_config_clear_lockout
+    # Save config with lockout cleared
+    lockout_data = {"locked_out" => false, "lockout_until" => nil}
+    save_security_config(Security.mode, nil, nil, Security.unlock_timeout, Security.extendable?, lockout_data)
+  end
+
+  private def send_lockout_notification
+    # Stub for Task 5 - will be fully implemented later
+    # TODO: Implement in Task 5
   end
 
   def start
@@ -575,15 +588,81 @@ class GentilityAgent
       end
     when "security_unlock"
       credential = params.try(&.["credential"]?.try(&.to_s))
-      if credential
-        if Security.unlock(credential)
-          send_status # Send updated security status
-          {"success" => true, "message" => "Agent unlocked successfully"}
+      unless credential
+        return {"error" => "Missing credential parameter"}
+      end
+
+      # Check if locked out
+      if Security.locked_out?
+        if Security.lockout_until
+          # Temporary lockout
+          locked_for = (Security.lockout_until.not_nil! - Time.utc).total_seconds.to_i
+          return {
+            "error"        => "Agent locked due to too many failed attempts",
+            "lockout_mode" => "temporary",
+            "locked_until" => Security.lockout_until.not_nil!.to_unix_f,
+            "locked_for"   => locked_for,
+          }
         else
-          {"error" => "Invalid credentials"}
+          # Permanent lockout
+          return {
+            "error"        => "Agent permanently locked due to too many failed attempts",
+            "lockout_mode" => "permanent",
+            "message"      => "Manual intervention required: restart agent or edit config file",
+          }
         end
+      end
+
+      # Check if in backoff period
+      unless Security.can_attempt?
+        retry_after = Security.time_until_next_attempt
+        attempts_remaining = Security.max_attempts - Security.failed_attempt_count
+        return {
+          "error"              => "Too many failed attempts",
+          "retry_after"        => retry_after,
+          "attempts_remaining" => attempts_remaining,
+        }
+      end
+
+      # Attempt unlock
+      if Security.unlock(credential)
+        send_status # Send updated security status
+
+        # If we just recovered from lockout, clear persisted state
+        if Security.was_locked_out?
+          save_security_config_clear_lockout
+        end
+
+        {"success" => true, "message" => "Agent unlocked successfully"}
       else
-        {"error" => "Missing credential parameter"}
+        # Invalid credentials
+        attempts_remaining = Security.max_attempts - Security.failed_attempt_count
+
+        # Check if this failure triggered lockout
+        if Security.locked_out?
+          # Persist lockout state
+          lockout_data = Security.persist_lockout
+          save_security_config(Security.mode, nil, nil, Security.unlock_timeout, Security.extendable?, lockout_data)
+          send_lockout_notification
+
+          if Security.lockout_until
+            locked_for = (Security.lockout_until.not_nil! - Time.utc).total_seconds.to_i
+            return {
+              "error"        => "Agent locked due to too many failed attempts",
+              "lockout_mode" => "temporary",
+              "locked_until" => Security.lockout_until.not_nil!.to_unix_f,
+              "locked_for"   => locked_for,
+            }
+          else
+            return {
+              "error"        => "Agent permanently locked due to too many failed attempts",
+              "lockout_mode" => "permanent",
+              "message"      => "Manual intervention required",
+            }
+          end
+        end
+
+        {"error" => "Invalid credentials", "attempts_remaining" => attempts_remaining}
       end
     when "security_lock"
       Security.lock

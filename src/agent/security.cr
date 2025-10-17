@@ -81,6 +81,28 @@ module Security
     @@failed_attempts
   end
 
+  def self.lockout_until : Time?
+    @@lockout_until
+  end
+
+  def self.max_attempts : Int32
+    @@max_attempts
+  end
+
+  def self.unlock_timeout : Int32
+    @@unlock_timeout
+  end
+
+  def self.extendable? : Bool
+    @@extendable
+  end
+
+  def self.was_locked_out? : Bool
+    # Track if we just cleared a lockout (for cleanup)
+    # Implementation: check if lockout was just cleared
+    false # TODO: implement tracking if needed
+  end
+
   private def self.calculate_backoff_seconds(attempt : Int32) : Int32
     # 30s, 60s, 120s, 240s (or 1s, 2s, 4s, 8s in test mode)
     base = ENV.fetch("RATE_LIMIT_TEST_MODE", "false") == "true" ? 1 : 30
