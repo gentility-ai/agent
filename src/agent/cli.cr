@@ -610,9 +610,10 @@ class AgentProvisioner
     return unless ws && !ws.closed?
 
     debug_log("→ Sending: #{data.inspect}")
-    packed = data.to_msgpack
-    debug_log("→ Packed message (#{packed.size} bytes)")
-    ws.send(packed)
+    ws.stream(binary: true) do |io|
+      data.to_msgpack(io)
+    end
+    debug_log("→ Binary message sent")
   end
 
   private def prompt_organization(options : Array(MessagePack::Type)?) : String
@@ -815,6 +816,77 @@ rescue ex : Exception
   exit 1
 end
 
+def clear_lockout_from_cli
+  config_file = AgentConfig.get_config_path
+
+  unless File.exists?(config_file)
+    puts "❌ Error: Config file not found: #{config_file}"
+    exit 1
+  end
+
+  # Read config
+  config = YAML.parse(File.read(config_file))
+  config_hash = config.as_h? || {} of YAML::Any => YAML::Any
+
+  # Check if security section exists
+  unless config_hash.has_key?(YAML::Any.new("security"))
+    puts "🔐 No security configuration found"
+    exit 0
+  end
+
+  security_hash = config_hash[YAML::Any.new("security")].as_h? || {} of YAML::Any => YAML::Any
+
+  # Check if rate_limiting section exists with lockout
+  if rl = security_hash[YAML::Any.new("rate_limiting")]?.try(&.as_h?)
+    if rl[YAML::Any.new("locked_out")]?.try(&.as_bool?)
+      # Remove lockout state
+      rl.delete(YAML::Any.new("locked_out"))
+      rl.delete(YAML::Any.new("lockout_until"))
+
+      # Write updated config
+      File.write(config_file, config_hash.to_yaml)
+      File.chmod(config_file, 0o600)
+
+      puts "🔐 Lockout Cleared"
+      puts "================="
+      puts "Lockout state removed from configuration."
+      puts ""
+
+      # Try to signal running agent
+      begin
+        # Find agent PID
+        result = `pgrep -f 'gentility.*run|gentility-agent'`.strip
+        if !result.empty?
+          pids = result.split("\n")
+          pids.each do |pid|
+            puts "Signaling agent process (PID #{pid}) to reload config..."
+            Process.signal(Signal::HUP, pid.to_i)
+          end
+          puts ""
+          puts "✅ Agent notified to reload configuration"
+        else
+          puts "⚠️  No running agent found"
+          puts "If agent is running, restart it to apply changes:"
+          puts "  sudo systemctl restart gentility"
+        end
+      rescue ex : Exception
+        puts "⚠️  Could not signal agent: #{ex.message}"
+        puts "Restart agent to apply changes:"
+        puts "  sudo systemctl restart gentility"
+      end
+    else
+      puts "✅ Agent is not locked out"
+    end
+  else
+    puts "✅ Agent is not locked out"
+  end
+
+  exit 0
+rescue ex : Exception
+  puts "❌ Error: #{ex.message}"
+  exit 1
+end
+
 def show_status
   puts "Gentility Agent v#{VERSION}"
   puts "==================#{("=" * VERSION.size)}"
@@ -966,6 +1038,7 @@ def show_help
   puts "    totp [secret]        Enable TOTP authentication"
   puts "    password [pass]      Enable password authentication"
   puts "    none                 Disable security"
+  puts "    clear-lockout        Clear rate limiting lockout state"
   puts ""
   puts "PROMISCUOUS ACTIONS:"
   puts "    enable               Enable promiscuous mode"
@@ -1122,20 +1195,26 @@ def main
     when "security"
       if ARGV.size >= 2
         mode = ARGV[1]
-        value = ARGV.size >= 3 ? ARGV[2] : nil
-        setup_security(mode, value)
+        if mode == "clear-lockout"
+          clear_lockout_from_cli
+        else
+          value = ARGV.size >= 3 ? ARGV[2] : nil
+          setup_security(mode, value)
+        end
       else
         puts "Usage: #{PROGRAM_NAME} security <mode> [value]"
         puts ""
         puts "Security modes:"
-        puts "  totp [secret]     - Enable TOTP authentication (generates secret if not provided)"
-        puts "  password [pass]   - Enable password authentication (prompts if not provided)"
-        puts "  none             - Disable security"
+        puts "  totp [secret]       - Enable TOTP authentication (generates secret if not provided)"
+        puts "  password [pass]     - Enable password authentication (prompts if not provided)"
+        puts "  none                - Disable security"
+        puts "  clear-lockout       - Clear rate limiting lockout state"
         puts ""
         puts "Examples:"
         puts "  #{PROGRAM_NAME} security totp"
         puts "  #{PROGRAM_NAME} security password mySecretPass123"
         puts "  #{PROGRAM_NAME} security none"
+        puts "  #{PROGRAM_NAME} security clear-lockout"
         exit 1
       end
     when "test-totp"
@@ -1207,6 +1286,12 @@ def main
     puts "Received SIGTERM, shutting down gracefully..."
     agent.stop
     exit 0
+  end
+
+  Signal::HUP.trap do
+    puts ""
+    puts "Received SIGHUP, reloading security configuration..."
+    agent.reload_security_config
   end
 
   agent.start

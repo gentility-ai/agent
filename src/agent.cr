@@ -297,6 +297,12 @@ class GentilityAgent
     @websocket.try(&.close)
   end
 
+  def reload_security_config
+    puts "Reloading security configuration..."
+    load_security_config
+    puts "Security configuration reloaded"
+  end
+
   private def debug_log(message : String)
     if @debug
       puts "[DEBUG] #{Time.local.to_s("%Y-%m-%d %H:%M:%S")} #{message}"
