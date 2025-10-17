@@ -22,7 +22,6 @@
 
 require "http/web_socket"
 require "json"
-require "msgpack"
 require "uri"
 require "process"
 require "file"
@@ -344,13 +343,9 @@ class GentilityAgent
     # Connect to WebSocket
     @websocket = HTTP::WebSocket.new(ws_uri)
 
-    # Set up message handlers
+    # Set up message handler
     @websocket.not_nil!.on_message do |message|
       handle_message(message)
-    end
-
-    @websocket.not_nil!.on_binary do |binary|
-      handle_binary_message(binary)
     end
 
     @websocket.not_nil!.on_close do |close_code, message|
@@ -385,27 +380,22 @@ class GentilityAgent
   end
 
   private def handle_message(message : String)
-    # For debugging - shouldn't receive text messages normally
-    puts "Received text message: #{message}"
-  end
-
-  private def handle_binary_message(binary : Bytes)
-    debug_log("← Received binary message (#{binary.size} bytes)")
+    debug_log("← Received message (#{message.size} bytes)")
 
     begin
-      # Unpack MessagePack
-      data = MessagePack.unpack(binary)
-      debug_log("← Unpacked: #{data.inspect}")
+      # Parse JSON
+      data = JSON.parse(message)
+      debug_log("← Parsed: #{data.inspect}")
 
-      # Work directly with the MessagePack::Any data
+      # Handle the parsed JSON data
       handle_parsed_message(data)
     rescue ex : Exception
-      puts "Error parsing binary message: #{ex.message}"
+      puts "Error parsing JSON message: #{ex.message}"
       debug_log("← Parse error: #{ex.message}")
     end
   end
 
-  private def handle_parsed_message(msg : MessagePack::Any)
+  private def handle_parsed_message(msg : JSON::Any)
     case msg["type"]?.try(&.to_s)
     when "welcome"
       puts "✅ Connected to server!"
@@ -464,7 +454,7 @@ class GentilityAgent
     end
   end
 
-  private def handle_command(msg : MessagePack::Any)
+  private def handle_command(msg : JSON::Any)
     request_id = msg["request_id"]?.try(&.to_s)
     command = msg["command"]?.try(&.to_s)
     params = msg["params"]?
@@ -487,7 +477,7 @@ class GentilityAgent
     end
   end
 
-  private def execute_command(command : String, params : MessagePack::Any?)
+  private def execute_command(command : String, params : JSON::Any?)
     case command
     when "ping"
       {"status" => "pong", "timestamp" => Time.utc.to_unix_f}
@@ -774,7 +764,7 @@ class GentilityAgent
     {"error" => "Failed to get system info: #{ex.message}"}
   end
 
-  private def check_capabilities(capabilities_list : Array(MessagePack::Type))
+  private def check_capabilities(capabilities_list : Array(JSON::Any))
     available_packages = [] of String
 
     capabilities_list.each do |capability|
@@ -1001,19 +991,17 @@ class GentilityAgent
     end
   end
 
-  # Helper method to send a message with automatic type conversion
+  # Helper method to send a message as JSON
   private def send_message(data : Hash)
     debug_log("→ Sending: #{data.inspect}")
 
-    # Pack and send the data directly
     websocket = @websocket
     return unless websocket && !websocket.closed?
 
     begin
-      websocket.stream(binary: true) do |io|
-        debug_log("→ Sending binary message")
-        data.to_msgpack(io)
-      end
+      json = data.to_json
+      debug_log("→ Sending JSON message (#{json.size} bytes)")
+      websocket.send(json)
     rescue ex : Exception
       puts "Error sending message: #{ex.message}"
       debug_log("→ Send error: #{ex.message}")

@@ -23,15 +23,15 @@ module TestHelpers
 
   # Mock WebSocket for testing
   class MockWebSocket
-    getter messages_sent : Array(Bytes)
+    getter messages_sent : Array(String)
     property closed : Bool
 
     def initialize
-      @messages_sent = [] of Bytes
+      @messages_sent = [] of String
       @closed = false
     end
 
-    def send(data : Bytes)
+    def send(data : String)
       @messages_sent << data
     end
 

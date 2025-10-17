@@ -6,9 +6,6 @@ targets:
     main: src/agent.cr
 
 dependencies:
-  msgpack:
-    github: crystal-community/msgpack-crystal
-    version: ~> 1.0
   crotp:
     github: philnash/crotp
   qr-code:
