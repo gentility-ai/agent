@@ -97,6 +97,10 @@ module Security
     @@extendable
   end
 
+  def self.lockout_mode : String
+    @@lockout_mode
+  end
+
   def self.was_locked_out? : Bool
     # Track if we just cleared a lockout (for cleanup)
     # Implementation: check if lockout was just cleared
@@ -240,13 +244,29 @@ module Security
   end
 
   def self.status
-    {
+    status_hash = {
       "security_enabled" => @@mode != "none",
       "security_mode"    => @@mode,
       "active"           => unlocked?,
       "time_remaining"   => time_remaining,
       "extendable"       => @@extendable,
     }
+
+    # Add lockout info if applicable
+    if @@locked_out
+      status_hash = status_hash.merge({
+        "locked_out"   => true,
+        "lockout_mode" => @@lockout_mode,
+      })
+
+      if @@lockout_until
+        status_hash = status_hash.merge({
+          "lockout_until" => @@lockout_until.not_nil!.to_unix_f
+        })
+      end
+    end
+
+    status_hash
   end
 
   def self.validate_promiscuous_auth(credential : String) : Bool

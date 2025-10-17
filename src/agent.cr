@@ -204,8 +204,27 @@ class GentilityAgent
   end
 
   private def send_lockout_notification
-    # Stub for Task 5 - will be fully implemented later
-    # TODO: Implement in Task 5
+    # SERVER INTEGRATION NOTE:
+    # When the agent enters lockout state, it sends a security_lockout message.
+    # The server should:
+    # 1. Display warning in UI: "Agent locked due to failed auth attempts"
+    # 2. For temporary lockout: show "locked_until" timestamp to user
+    # 3. For permanent lockout: show "Manual intervention required" message
+    # 4. Stop sending security_unlock commands until lockout clears
+    # 5. Display lockout status in agent status view
+
+    lockout_msg = {
+      "type"            => "security_lockout",
+      "lockout_mode"    => Security.lockout_mode,
+      "failed_attempts" => Security.failed_attempt_count,
+      "timestamp"       => Time.utc.to_unix_f,
+    }
+
+    if lockout_until = Security.lockout_until
+      lockout_msg = lockout_msg.merge({"lockout_until" => lockout_until.to_unix_f})
+    end
+
+    send_message(lockout_msg)
   end
 
   def start

@@ -51,6 +51,17 @@
       ]
     },
 
+    "SecurityLockoutMessage": {
+      "properties": {
+        "type": { "enum": ["security_lockout"] },
+        "lockout_mode": { "type": "string" },
+        "lockout_until": { "type": "float64" },
+        "failed_attempts": { "type": "int32" },
+        "timestamp": { "type": "float64" }
+      },
+      "required": ["type", "lockout_mode", "timestamp"]
+    },
+
     "CommandMessage": {
       "properties": {
         "type": { "enum": ["command"] },
@@ -343,6 +354,7 @@
     "welcome": { "ref": "WelcomeMessage" },
     "ping": { "ref": "PingMessage" },
     "pong": { "ref": "PongMessage" },
+    "security_lockout": { "ref": "SecurityLockoutMessage" },
     "command": { "ref": "CommandMessage" },
     "response": { "ref": "ResponseMessage" },
     "error": { "ref": "ErrorMessage" },
