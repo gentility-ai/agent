@@ -16,10 +16,12 @@
 
     "WelcomeMessage": {
       "properties": {
-        "type": { "enum": ["welcome"] },
-        "machine_id": { "type": "string" }
+        "type": { "enum": ["welcome"] }
       },
-      "required": ["type"]
+      "optionalProperties": {
+        "machine_id": { "type": "string" },
+        "server_x25519_pubkey": { "type": "string" }
+      }
     },
 
     "PingMessage": {
@@ -228,6 +230,30 @@
           "properties": {
             "command_type": { "enum": ["security_unset"] }
           }
+        },
+        "store_credentials": {
+          "properties": {
+            "command_type": { "enum": ["store_credentials"] },
+            "db_target_id": { "type": "string" },
+            "credentials": { "type": "string" }
+          },
+          "required": ["db_target_id", "credentials"]
+        },
+        "secure_psql_query": {
+          "properties": {
+            "command_type": { "enum": ["secure_psql_query"] },
+            "encrypted_payload": { "type": "string" },
+            "query": { "type": "string" }
+          },
+          "required": ["encrypted_payload", "query"]
+        },
+        "secure_mysql_query": {
+          "properties": {
+            "command_type": { "enum": ["secure_mysql_query"] },
+            "encrypted_payload": { "type": "string" },
+            "query": { "type": "string" }
+          },
+          "required": ["encrypted_payload", "query"]
         }
       }
     },
