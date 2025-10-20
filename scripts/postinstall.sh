@@ -113,7 +113,7 @@ fi
 
 # Create default config file if it doesn't exist
 if [ ! -f /etc/gentility.yaml ]; then
-    cp /etc/gentility.conf.example /etc/gentility.yaml
+    cp /etc/gentility.yaml.example /etc/gentility.yaml
     chmod 600 /etc/gentility.yaml
     chown root:root /etc/gentility.yaml
 fi
