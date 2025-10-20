@@ -1,9 +1,9 @@
-require "ed25519"
 require "base58"
-require "openssl/cipher"
+require "openssl"
 require "base64"
 require "json"
 require "yaml"
+require "ed25519"
 
 # Cryptographic utilities for Ed25519 keypairs and credential encryption
 module AgentCrypto
@@ -111,7 +111,7 @@ module AgentCrypto
   end
 
   # Load and decrypt credentials from config file
-  def self.load_credentials(config_file : String, db_target_id : String, signing_key : Ed25519::SigningKey) : String?
+  def self.load_credentials(config_file : String, db_target_id : String, signing_key : Ed25519::SigningKey, silent : Bool = false) : String?
     return nil unless File.exists?(config_file)
 
     config = YAML.parse(File.read(config_file))
@@ -127,7 +127,64 @@ module AgentCrypto
     encrypted_str = encrypted.as_s? || return nil
     decrypt(signing_key, encrypted_str)
   rescue ex
-    puts "Warning: Failed to load credentials for #{db_target_id}: #{ex.message}"
+    puts "Warning: Failed to load credentials for #{db_target_id}: #{ex.message}" unless silent
     nil
+  end
+
+  # Convert Ed25519 seed to X25519 keypair
+  # Returns {private_key, public_key} as 32-byte Bytes
+  def self.ed25519_seed_to_x25519_keypair(ed25519_seed : Bytes) : {Bytes, Bytes}
+    raise "Ed25519 seed must be 32 bytes" unless ed25519_seed.size == 32
+
+    # Use ed25519 shard's built-in methods
+    # The seed is already in the right format for X25519
+    # For X25519, we use the seed directly as the private key (after clamping)
+    x25519_private = ed25519_seed.dup
+    Ed25519.adjust_bytes_25519(x25519_private)
+
+    # Derive public key using curve25519 scalar multiplication with base point
+    x25519_public = Ed25519::Curve25519.scalar_mult_base(x25519_private)
+
+    {x25519_private, x25519_public}
+  end
+
+  # Perform X25519 ECDH to derive shared secret
+  # Returns 32-byte shared secret
+  def self.x25519_ecdh(my_private_key : Bytes, their_public_key : Bytes) : Bytes
+    raise "X25519 private key must be 32 bytes" unless my_private_key.size == 32
+    raise "X25519 public key must be 32 bytes" unless their_public_key.size == 32
+
+    # Use ed25519 shard's Curve25519 scalar multiplication
+    # shared_secret = my_private_key * their_public_key
+    Ed25519::Curve25519.scalar_mult(my_private_key, their_public_key)
+  end
+
+  # Decrypt credentials encrypted with AES-256-CBC using shared secret
+  # encrypted_payload should be base64(iv + ciphertext)
+  # The IV is the first 16 bytes, followed by the ciphertext
+  def self.decrypt_with_shared_secret(shared_secret : Bytes, encrypted_payload : String) : String
+    raise "Shared secret must be 32 bytes" unless shared_secret.size == 32
+
+    # Decode base64 input
+    payload = Base64.decode(encrypted_payload)
+
+    # Validate size (must have at least IV)
+    raise "Encrypted payload must include at least 16 bytes for IV" unless payload.size >= 16
+
+    # Split payload into IV (first 16 bytes) and ciphertext
+    iv = payload[0, 16]
+    ciphertext = payload[16..-1]
+
+    cipher = OpenSSL::Cipher.new("AES-256-CBC")
+    cipher.decrypt
+    cipher.key = shared_secret
+    cipher.iv = iv
+
+    # Decrypt ciphertext
+    decrypted = IO::Memory.new
+    decrypted.write(cipher.update(ciphertext))
+    decrypted.write(cipher.final)
+
+    String.new(decrypted.to_slice)
   end
 end

@@ -193,7 +193,7 @@ describe "Database Commands" do
         AgentCrypto.store_credentials(config_file, db_id, creds, signing_key1)
 
         # Try to load with different key - returns nil due to caught exception
-        loaded = AgentCrypto.load_credentials(config_file, db_id, signing_key2)
+        loaded = AgentCrypto.load_credentials(config_file, db_id, signing_key2, silent: true)
 
         # Should return nil or garbage, but not the original creds
         loaded.should be_nil

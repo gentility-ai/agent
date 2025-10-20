@@ -1,10 +1,9 @@
 require "crotp"
 require "qr-code"
-require "ed25519"
 require "base58"
 require "yaml"
 require "http/web_socket"
-require "msgpack"
+require "openssl"
 require "./config"
 require "./crypto"
 require "./oauth"
@@ -133,12 +132,7 @@ def parse_arguments
 
   # Set server_url based on environment if not explicitly configured
   unless server_url
-    server_url = case environment
-                 when "dev", "development"
-                   "https://termite-lasting-lively.ngrok-free.app"
-                 else
-                   "https://core.gentility.ai"
-                 end
+    server_url = AgentConfig::ServerURLs.websocket_url(environment)
   end
 
   {access_key, server_url, nickname, environment, debug}
@@ -179,8 +173,8 @@ def setup_config(token : String)
     # REQUIRED: Your Gentility AI access token (Ed25519 private key in base58)
     access_key: "#{token}"
 
-    # OPTIONAL: Server URL (default: wss://core.gentility.ai)
-    # server_url: wss://core.gentility.ai
+    # OPTIONAL: Server URL (default: wss://ws.gentility.ai)
+    # server_url: wss://ws.gentility.ai
 
     # OPTIONAL: Agent nickname (default: hostname)
     # nickname: #{`hostname`.strip}
@@ -409,12 +403,7 @@ def run_oauth_flow(environment : String, headless : Bool, debug : Bool, org_id :
     # Step 2: Connect to server immediately to provision machine key
     puts "🔗 Connecting to server to provision machine key..."
 
-    server_url = case environment
-                 when "dev", "development"
-                   "https://termite-lasting-lively.ngrok-free.app"
-                 else
-                   "https://core.gentility.ai"
-                 end
+    server_url = AgentConfig::ServerURLs.websocket_url(environment)
 
     # Create a temporary agent just to provision the key
     provision_machine_key(oauth_token, server_url, environment, debug, org_id, env_name, nickname)
@@ -462,11 +451,11 @@ class AgentProvisioner
   @env_name : String?
   @nickname : String?
   @websocket : HTTP::WebSocket?
-  @provision_channel : Channel(MessagePack::Any)
+  @provision_channel : Channel(JSON::Any)
   @complete : Bool = false
 
   def initialize(@oauth_token, @server_url, @environment, @debug, @org_id, @env_name, @nickname)
-    @provision_channel = Channel(MessagePack::Any).new
+    @provision_channel = Channel(JSON::Any).new
   end
 
   private def debug_log(message : String)
@@ -545,8 +534,18 @@ class AgentProvisioner
         @websocket.try(&.close)
         break
       when "error"
+        error_type = response["error"]?.try(&.to_s) || "unknown_error"
         error_msg = response["message"]?.try(&.to_s) || "Unknown error"
-        raise "Server error: #{error_msg}"
+
+        puts ""
+        puts "❌ Provisioning failed: #{error_type}"
+        puts "   #{error_msg}"
+        puts ""
+        puts "This is a server-side error. Please contact support if the issue persists."
+        puts ""
+
+        @websocket.try(&.close)
+        return
       else
         raise "Unexpected response type: #{response["type"]?}"
       end
@@ -559,7 +558,7 @@ class AgentProvisioner
       scheme: (uri.scheme == "https" || uri.scheme == "wss") ? "wss" : "ws",
       host: uri.host,
       port: uri.port,
-      path: "/agent/ws/websocket",
+      path: "/agent/websocket",
       query: URI::Params.build do |params|
         params.add "oauth_token", @oauth_token
         params.add "version", VERSION
@@ -570,12 +569,12 @@ class AgentProvisioner
 
     @websocket = HTTP::WebSocket.new(ws_uri)
 
-    # Set up binary message handler
-    @websocket.not_nil!.on_binary do |binary|
+    # Set up JSON message handler
+    @websocket.not_nil!.on_message do |message|
       begin
-        debug_log("← Received binary message (#{binary.size} bytes)")
-        data = MessagePack.unpack(binary)
-        debug_log("← Unpacked: #{data.inspect}")
+        debug_log("← Received message (#{message.size} bytes)")
+        data = JSON.parse(message)
+        debug_log("← Parsed: #{data.inspect}")
         @provision_channel.send(data)
       rescue ex
         puts "Error parsing message: #{ex.message}"
@@ -596,7 +595,7 @@ class AgentProvisioner
     debug_log("WebSocket connection established")
   end
 
-  private def wait_for_message(timeout : Time::Span) : MessagePack::Any
+  private def wait_for_message(timeout : Time::Span) : JSON::Any
     select
     when msg = @provision_channel.receive
       return msg
@@ -610,13 +609,12 @@ class AgentProvisioner
     return unless ws && !ws.closed?
 
     debug_log("→ Sending: #{data.inspect}")
-    ws.stream(binary: true) do |io|
-      data.to_msgpack(io)
-    end
-    debug_log("→ Binary message sent")
+    json = data.to_json
+    debug_log("→ Sending JSON message (#{json.size} bytes)")
+    ws.send(json)
   end
 
-  private def prompt_organization(options : Array(MessagePack::Type)?) : String
+  private def prompt_organization(options : Array(JSON::Any)?) : String
     # Non-interactive mode
     if org_id = @org_id
       return org_id
@@ -628,11 +626,10 @@ class AgentProvisioner
     puts ""
 
     orgs = options.map do |opt|
-      opt_hash = opt.as(Hash(MessagePack::Type, MessagePack::Type))
       {
-        "id"   => opt_hash["id"].as(String),
-        "name" => opt_hash["name"].as(String),
-        "slug" => opt_hash["slug"]?.try(&.as(String)),
+        "id"   => opt["id"].as_s,
+        "name" => opt["name"].as_s,
+        "slug" => opt["slug"]?.try(&.as_s?),
       }
     end
 
@@ -656,7 +653,7 @@ class AgentProvisioner
     selected["id"].not_nil!
   end
 
-  private def prompt_environment(options : Array(MessagePack::Type)?) : String
+  private def prompt_environment(options : Array(JSON::Any)?) : String
     # Non-interactive mode
     if env_name = @env_name
       return env_name
@@ -668,10 +665,9 @@ class AgentProvisioner
     puts ""
 
     envs = options.map do |opt|
-      opt_hash = opt.as(Hash(MessagePack::Type, MessagePack::Type))
       {
-        "value" => opt_hash["value"].as(String),
-        "label" => opt_hash["label"].as(String),
+        "value" => opt["value"].as_s,
+        "label" => opt["label"].as_s,
       }
     end
 
@@ -706,6 +702,15 @@ class AgentProvisioner
              end
 
     config_hash = config.as_h? || {} of YAML::Any => YAML::Any
+
+    # Generate ed25519_seed_key for X25519 key exchange if not already present
+    unless config_hash.has_key?(YAML::Any.new("ed25519_seed_key"))
+      # Generate new Ed25519 seed (32 random bytes)
+      seed_bytes = Random::Secure.random_bytes(32)
+      seed_base58 = Base58.encode(seed_bytes)
+      config_hash[YAML::Any.new("ed25519_seed_key")] = YAML::Any.new(seed_base58)
+      puts "   Generated ed25519_seed_key for secure credential exchange"
+    end
 
     # Save machine key and metadata
     config_hash[YAML::Any.new("machine_key")] = YAML::Any.new(machine_key)

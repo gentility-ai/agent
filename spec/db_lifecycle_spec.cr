@@ -393,7 +393,7 @@ describe "Database Credentials Lifecycle" do
 
         # Try to load with different key
         signing_key2 = Ed25519::SigningKey.new  # Different key
-        loaded = AgentCrypto.load_credentials(config_file1, db_id, signing_key2)
+        loaded = AgentCrypto.load_credentials(config_file1, db_id, signing_key2, silent: true)
 
         # Should return nil (decryption fails)
         loaded.should be_nil
@@ -431,7 +431,7 @@ describe "Database Credentials Lifecycle" do
         File.write(config_file, "this is not valid yaml: {{{")
 
         # Should handle gracefully
-        loaded = AgentCrypto.load_credentials(config_file, db_id, signing_key)
+        loaded = AgentCrypto.load_credentials(config_file, db_id, signing_key, silent: true)
         # Returns nil on error (caught in rescue block)
       ensure
         cleanup_test_agent(config_file)

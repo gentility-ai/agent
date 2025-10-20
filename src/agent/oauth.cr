@@ -9,14 +9,8 @@ require "digest/sha256"
 module OAuth
   # OAuth2 configuration for different environments
   class Config
-    PRODUCTION_AUTHORIZE_URL = "https://core.gentility.ai/oauth/authorize"
-    PRODUCTION_TOKEN_URL     = "https://core.gentility.ai/oauth/token"
-    PRODUCTION_DEVICE_CODE_URL = "https://core.gentility.ai/oauth/device/code"
-    DEVELOPMENT_AUTHORIZE_URL = "https://termite-lasting-lively.ngrok-free.app/oauth/authorize"
-    DEVELOPMENT_TOKEN_URL     = "https://termite-lasting-lively.ngrok-free.app/oauth/token"
-    DEVELOPMENT_DEVICE_CODE_URL = "https://termite-lasting-lively.ngrok-free.app/oauth/device/code"
-    CLIENT_ID                = "gentility-agent"
-    SCOPES                   = "agent:connect agent:execute"
+    CLIENT_ID = "gentility-agent"
+    SCOPES    = "agent:connect agent:execute"
 
     getter authorization_endpoint : String
     getter token_endpoint : String
@@ -25,12 +19,9 @@ module OAuth
     getter scopes : String
 
     def initialize(environment : String = "prod")
-      @authorization_endpoint, @token_endpoint, @device_code_endpoint = case environment
-                                                                         when "dev", "development"
-                                                                           {DEVELOPMENT_AUTHORIZE_URL, DEVELOPMENT_TOKEN_URL, DEVELOPMENT_DEVICE_CODE_URL}
-                                                                         else
-                                                                           {PRODUCTION_AUTHORIZE_URL, PRODUCTION_TOKEN_URL, PRODUCTION_DEVICE_CODE_URL}
-                                                                         end
+      @authorization_endpoint = AgentConfig::ServerURLs.oauth_authorize_url(environment)
+      @token_endpoint = AgentConfig::ServerURLs.oauth_token_url(environment)
+      @device_code_endpoint = AgentConfig::ServerURLs.oauth_device_code_url(environment)
       @client_id = CLIENT_ID
       @scopes = SCOPES
     end

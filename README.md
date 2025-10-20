@@ -6,6 +6,7 @@ A lightweight daemon that connects your servers and computers to Gentility AI.
 
 - **Simple and Auditable** trust, but verify
 - **Local credential capability** so your secrets stay with you
+- **Secure credential exchange** using X25519 key exchange and AES-256-CBC encryption
 - **Database query execution** (PostgreSQL and MySQL)
 - **File read/write operations** (when enabled)
 - **Lockable** for ultimate peace of mind
@@ -165,8 +166,8 @@ The configuration file supports additional security and operational settings:
 GENTILITY_TOKEN="gnt_1234567890abcdef"
 
 # Optional: Server connection settings
-SERVER_URL="wss://core.gentility.ai"  # Default server
-NICKNAME="my-server"                 # Agent nickname (default: hostname)
+SERVER_URL="wss://ws.gentility.ai"  # Default server
+NICKNAME="staging-app-03"                 # Agent nickname (default: hostname)
 ENVIRONMENT="prod"                   # Environment: prod or staging
 DEBUG="false"                        # Enable debug logging
 
@@ -246,6 +247,32 @@ sudo ufw status
 - The agent runs with minimal privileges
 - Configuration files are protected with appropriate permissions
 - No sensitive data is stored in logs
+
+### Secure Credential Exchange (v1.1.0+)
+
+The agent implements X25519 Elliptic Curve Diffie-Hellman (ECDH) key exchange for secure credential transmission:
+
+**How it works:**
+
+1. **Key Generation**: Agent generates an Ed25519 seed key during initial setup (`ed25519_seed_key`)
+2. **Connection**: Agent derives X25519 keypair from seed and sends public key to server via connection parameters
+3. **Welcome**: Server sends its X25519 public key in the welcome message (`server_x25519_pubkey`)
+4. **Shared Secret**: Both parties independently derive the same shared secret using ECDH
+5. **Encryption**: Server encrypts database credentials with AES-256-CBC using the shared secret
+6. **Transmission**: Encrypted credentials are sent to agent for database queries
+
+**Security properties:**
+
+- Shared secret is never transmitted over the network
+- Each agent has a unique seed key
+- Credentials are encrypted at rest in the agent's config file
+- TLS provides additional transport-layer protection
+
+**New Commands:**
+
+- `store_credentials`: Server stores encrypted credentials for a database target
+- `secure_psql_query`: Execute PostgreSQL query using encrypted credentials
+- `secure_mysql_query`: Execute MySQL query using encrypted credentials
 
 ### Rate Limiting
 

@@ -2,6 +2,47 @@ require "yaml"
 require "file"
 
 module AgentConfig
+  # Environment-specific server URLs
+  module ServerURLs
+    # WebSocket server URLs (for agent connections)
+    def self.websocket_url(environment : String) : String
+      case environment
+      when "dev", "development"
+        "https://dev-ws.gentility.ai"
+      else
+        "https://ws.gentility.ai"
+      end
+    end
+
+    # OAuth server URLs (for authentication)
+    def self.oauth_authorize_url(environment : String) : String
+      case environment
+      when "dev", "development"
+        "https://dev-mcp.gentility.ai/oauth/authorize"
+      else
+        "https://mcp.gentility.ai/oauth/authorize"
+      end
+    end
+
+    def self.oauth_token_url(environment : String) : String
+      case environment
+      when "dev", "development"
+        "https://dev-mcp.gentility.ai/oauth/token"
+      else
+        "https://mcp.gentility.ai/oauth/token"
+      end
+    end
+
+    def self.oauth_device_code_url(environment : String) : String
+      case environment
+      when "dev", "development"
+        "https://dev-mcp.gentility.ai/oauth/device/code"
+      else
+        "https://mcp.gentility.ai/oauth/device/code"
+      end
+    end
+  end
+
   # Get the configuration file path
   def self.get_config_path : String
     # Check for environment variable first (used by Homebrew service)

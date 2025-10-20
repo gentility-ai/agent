@@ -818,7 +818,7 @@ describe "WebSocket Commands" do
         end
 
         # Should return nil on decryption failure
-        loaded = AgentCrypto.load_credentials(config_file, db_id, signing_key)
+        loaded = AgentCrypto.load_credentials(config_file, db_id, signing_key, silent: true)
         loaded.should be_nil
       ensure
         cleanup_test_agent(config_file)

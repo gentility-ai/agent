@@ -15,7 +15,7 @@ description: |
   remote function and automation capabilities.
 
   Features:
-  - Remote command execution 
+  - Remote command execution
   - Database query execution (PostgreSQL and MySQL)
   - File read/write operations
   - Capability checking and validation
@@ -35,14 +35,6 @@ contents:
   # Systemd service file
   - src: ./gentility.service
     dst: /etc/systemd/system/gentility.service
-    file_info:
-      mode: 0644
-      owner: root
-      group: root
-
-  # Configuration file templates (both old and new format)
-  - src: ./gentility.yaml.example
-    dst: /etc/gentility.conf.example
     file_info:
       mode: 0644
       owner: root

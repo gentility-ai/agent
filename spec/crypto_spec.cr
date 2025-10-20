@@ -243,4 +243,268 @@ describe AgentCrypto do
       end
     end
   end
+
+  describe "X25519 Key Exchange" do
+    describe ".ed25519_seed_to_x25519_keypair" do
+      it "converts Ed25519 seed to X25519 keypair" do
+        # Generate a 32-byte seed
+        seed = Random::Secure.random_bytes(32)
+
+        # Convert to X25519
+        private_key, public_key = AgentCrypto.ed25519_seed_to_x25519_keypair(seed)
+
+        # Verify sizes
+        private_key.size.should eq 32
+        public_key.size.should eq 32
+      end
+
+      it "produces consistent keypairs from same seed" do
+        seed = Random::Secure.random_bytes(32)
+
+        private1, public1 = AgentCrypto.ed25519_seed_to_x25519_keypair(seed)
+        private2, public2 = AgentCrypto.ed25519_seed_to_x25519_keypair(seed)
+
+        private1.should eq private2
+        public1.should eq public2
+      end
+
+      it "produces different keypairs from different seeds" do
+        seed1 = Random::Secure.random_bytes(32)
+        seed2 = Random::Secure.random_bytes(32)
+
+        private1, public1 = AgentCrypto.ed25519_seed_to_x25519_keypair(seed1)
+        private2, public2 = AgentCrypto.ed25519_seed_to_x25519_keypair(seed2)
+
+        private1.should_not eq private2
+        public1.should_not eq public2
+      end
+
+      it "raises error for invalid seed length" do
+        invalid_seed = Random::Secure.random_bytes(16)
+
+        expect_raises(Exception, /32 bytes/) do
+          AgentCrypto.ed25519_seed_to_x25519_keypair(invalid_seed)
+        end
+      end
+    end
+
+    describe ".x25519_ecdh" do
+      it "derives shared secret from two keypairs" do
+        # Generate two keypairs
+        seed_alice = Random::Secure.random_bytes(32)
+        seed_bob = Random::Secure.random_bytes(32)
+
+        alice_private, alice_public = AgentCrypto.ed25519_seed_to_x25519_keypair(seed_alice)
+        bob_private, bob_public = AgentCrypto.ed25519_seed_to_x25519_keypair(seed_bob)
+
+        # Derive shared secrets
+        shared_secret_alice = AgentCrypto.x25519_ecdh(alice_private, bob_public)
+        shared_secret_bob = AgentCrypto.x25519_ecdh(bob_private, alice_public)
+
+        # Both parties should derive the same shared secret
+        shared_secret_alice.should eq shared_secret_bob
+        shared_secret_alice.size.should eq 32
+      end
+
+      it "produces consistent shared secrets" do
+        seed_alice = Random::Secure.random_bytes(32)
+        seed_bob = Random::Secure.random_bytes(32)
+
+        alice_private, alice_public = AgentCrypto.ed25519_seed_to_x25519_keypair(seed_alice)
+        bob_private, bob_public = AgentCrypto.ed25519_seed_to_x25519_keypair(seed_bob)
+
+        # Derive multiple times
+        shared1 = AgentCrypto.x25519_ecdh(alice_private, bob_public)
+        shared2 = AgentCrypto.x25519_ecdh(alice_private, bob_public)
+
+        shared1.should eq shared2
+      end
+
+      it "produces different shared secrets for different keypairs" do
+        seed_alice = Random::Secure.random_bytes(32)
+        seed_bob1 = Random::Secure.random_bytes(32)
+        seed_bob2 = Random::Secure.random_bytes(32)
+
+        alice_private, alice_public = AgentCrypto.ed25519_seed_to_x25519_keypair(seed_alice)
+        bob1_private, bob1_public = AgentCrypto.ed25519_seed_to_x25519_keypair(seed_bob1)
+        bob2_private, bob2_public = AgentCrypto.ed25519_seed_to_x25519_keypair(seed_bob2)
+
+        shared1 = AgentCrypto.x25519_ecdh(alice_private, bob1_public)
+        shared2 = AgentCrypto.x25519_ecdh(alice_private, bob2_public)
+
+        shared1.should_not eq shared2
+      end
+
+      it "raises error for invalid private key length" do
+        invalid_private = Random::Secure.random_bytes(16)
+        valid_public = Random::Secure.random_bytes(32)
+
+        expect_raises(Exception, /32 bytes/) do
+          AgentCrypto.x25519_ecdh(invalid_private, valid_public)
+        end
+      end
+
+      it "raises error for invalid public key length" do
+        valid_private = Random::Secure.random_bytes(32)
+        invalid_public = Random::Secure.random_bytes(16)
+
+        expect_raises(Exception, /32 bytes/) do
+          AgentCrypto.x25519_ecdh(valid_private, invalid_public)
+        end
+      end
+    end
+
+    describe ".decrypt_with_shared_secret" do
+      it "decrypts AES-256-CBC encrypted data" do
+        # Simulate server encrypting credentials
+        shared_secret = Random::Secure.random_bytes(32)
+        plaintext = %({
+          "host": "db.example.com",
+          "port": 5432,
+          "database": "mydb",
+          "username": "user",
+          "password": "secret"
+        })
+
+        # Encrypt with OpenSSL (simulating server-side)
+        cipher = OpenSSL::Cipher.new("AES-256-CBC")
+        cipher.encrypt
+        cipher.key = shared_secret
+        iv = Random::Secure.random_bytes(16)
+        cipher.iv = iv
+
+        # Get ciphertext
+        io = IO::Memory.new
+        io.write(cipher.update(plaintext))
+        io.write(cipher.final)
+        ciphertext = io.to_slice
+
+        # Prepend IV to ciphertext
+        payload = IO::Memory.new
+        payload.write(iv)
+        payload.write(ciphertext)
+
+        # Encode for transmission (IV + ciphertext)
+        encrypted_payload = Base64.strict_encode(payload.to_slice)
+
+        # Decrypt using agent method
+        decrypted = AgentCrypto.decrypt_with_shared_secret(
+          shared_secret,
+          encrypted_payload
+        )
+
+        decrypted.should eq plaintext
+      end
+
+      it "handles empty credentials" do
+        shared_secret = Random::Secure.random_bytes(32)
+        plaintext = ""
+
+        cipher = OpenSSL::Cipher.new("AES-256-CBC")
+        cipher.encrypt
+        cipher.key = shared_secret
+        iv = Random::Secure.random_bytes(16)
+        cipher.iv = iv
+
+        io = IO::Memory.new
+        io.write(cipher.update(plaintext))
+        io.write(cipher.final)
+        ciphertext = io.to_slice
+
+        # Prepend IV to ciphertext
+        payload = IO::Memory.new
+        payload.write(iv)
+        payload.write(ciphertext)
+
+        encrypted_payload = Base64.strict_encode(payload.to_slice)
+
+        decrypted = AgentCrypto.decrypt_with_shared_secret(
+          shared_secret,
+          encrypted_payload
+        )
+
+        decrypted.should eq plaintext
+      end
+
+      it "raises error for invalid shared secret length" do
+        invalid_secret = Random::Secure.random_bytes(16)
+        encrypted = Base64.strict_encode(Random::Secure.random_bytes(32))
+
+        expect_raises(Exception, /32 bytes/) do
+          AgentCrypto.decrypt_with_shared_secret(invalid_secret, encrypted)
+        end
+      end
+
+      it "raises error for payload smaller than IV size" do
+        secret = Random::Secure.random_bytes(32)
+        # Payload must be at least 16 bytes (IV size)
+        too_small = Base64.strict_encode(Random::Secure.random_bytes(8))
+
+        expect_raises(Exception, /16 bytes/) do
+          AgentCrypto.decrypt_with_shared_secret(secret, too_small)
+        end
+      end
+    end
+
+    describe "End-to-End X25519 Flow" do
+      it "simulates complete agent-server credential exchange" do
+        # Step 1: Agent generates X25519 keypair from ed25519 seed
+        agent_seed = Random::Secure.random_bytes(32)
+        agent_x25519_private, agent_x25519_public = AgentCrypto.ed25519_seed_to_x25519_keypair(agent_seed)
+
+        # Step 2: Server generates X25519 keypair
+        server_seed = Random::Secure.random_bytes(32)
+        server_x25519_private, server_x25519_public = AgentCrypto.ed25519_seed_to_x25519_keypair(server_seed)
+
+        # Step 3: Both parties derive shared secret
+        agent_shared_secret = AgentCrypto.x25519_ecdh(agent_x25519_private, server_x25519_public)
+        server_shared_secret = AgentCrypto.x25519_ecdh(server_x25519_private, agent_x25519_public)
+
+        # Verify shared secrets match
+        agent_shared_secret.should eq server_shared_secret
+
+        # Step 4: Server encrypts credentials
+        credentials = %({
+          "host": "production-db.example.com",
+          "port": 5432,
+          "database": "app_production",
+          "username": "app_user",
+          "password": "super_secret_password_123!"
+        })
+
+        cipher = OpenSSL::Cipher.new("AES-256-CBC")
+        cipher.encrypt
+        cipher.key = server_shared_secret
+        iv = Random::Secure.random_bytes(16)
+        cipher.iv = iv
+
+        # Encrypt credentials
+        ciphertext_io = IO::Memory.new
+        ciphertext_io.write(cipher.update(credentials))
+        ciphertext_io.write(cipher.final)
+        ciphertext = ciphertext_io.to_slice
+
+        # Prepend IV to ciphertext
+        payload = IO::Memory.new
+        payload.write(iv)
+        payload.write(ciphertext)
+
+        encrypted_payload = Base64.strict_encode(payload.to_slice)
+
+        # Step 5: Agent decrypts credentials
+        decrypted_credentials = AgentCrypto.decrypt_with_shared_secret(
+          agent_shared_secret,
+          encrypted_payload
+        )
+
+        # Verify decrypted credentials match original
+        decrypted_credentials.should eq credentials
+
+        # Verify we can parse the JSON
+        parsed = JSON.parse(decrypted_credentials)
+        parsed["host"].as_s.should eq "production-db.example.com"
+        parsed["password"].as_s.should eq "super_secret_password_123!"
+      end
+    end
+  end
 end

@@ -31,7 +31,7 @@ require "yaml"
 require "ed25519"
 require "base58"
 require "crypto/subtle"
-require "openssl/cipher"
+require "openssl"
 require "base64"
 
 # Agent modules
@@ -59,27 +59,55 @@ class GentilityAgent
   @debug : Bool = false
   @signing_key : Ed25519::SigningKey?
   @public_key : String?
+  @x25519_private_key : Bytes?
+  @x25519_public_key : Bytes?
+  @x25519_shared_secret : Bytes?
 
   def initialize(access_key : String, @server_url : String, @nickname : String, @environment : String = "prod", @debug : Bool = false)
-    # Try to parse as Ed25519 key first (machine_key)
-    # If that fails, treat it as OAuth token
-    begin
-      @signing_key = AgentCrypto.parse_private_key(access_key)
-      @public_key = AgentCrypto.public_key_base58(@signing_key.not_nil!)
+    # Determine if this is a machine_key or oauth_token based on prefix
+    if access_key.starts_with?("genkey-agent-")
       @machine_key = access_key
       @oauth_token = nil
-      puts "Using machine key authentication" if @debug
-      puts "Agent Public Key: #{@public_key}" if @debug
-    rescue
-      # Not an Ed25519 key, treat as OAuth token
       @signing_key = nil
       @public_key = nil
+      puts "Using machine key authentication" if @debug
+    else
       @machine_key = nil
       @oauth_token = access_key
+      @signing_key = nil
+      @public_key = nil
       puts "Using OAuth token authentication" if @debug
     end
 
     load_security_config
+    load_x25519_keys
+  end
+
+  private def load_x25519_keys
+    # Load ed25519_seed_key from config and derive X25519 keypair
+    config_file = AgentConfig.get_config_path
+    config = AgentConfig.load_config_from_file(config_file)
+
+    if config && (seed_key_b58 = config["ed25519_seed_key"]?.try(&.as_s?))
+      begin
+        seed_bytes = Base58.decode(seed_key_b58).to_slice
+
+        if seed_bytes.size != 32
+          puts "Warning: Invalid ed25519_seed_key size (#{seed_bytes.size} bytes, expected 32)" if @debug
+          return
+        end
+
+        # Derive X25519 keypair from Ed25519 seed
+        @x25519_private_key, @x25519_public_key = AgentCrypto.ed25519_seed_to_x25519_keypair(seed_bytes)
+
+        puts "X25519 keypair derived from ed25519_seed_key" if @debug
+        puts "X25519 Public Key: #{Base64.strict_encode(@x25519_public_key.not_nil!)}" if @debug
+      rescue ex
+        puts "Warning: Failed to load X25519 keys: #{ex.message}" if @debug
+      end
+    else
+      puts "No ed25519_seed_key found in config - secure query features will be unavailable" if @debug
+    end
   end
 
   private def load_security_config
@@ -228,7 +256,9 @@ class GentilityAgent
   end
 
   def start
+    config_file = AgentConfig.get_config_path
     puts "Starting Gentility Agent v#{VERSION}..."
+    puts "Config: #{config_file}#{File.exists?(config_file) ? "" : " (not found)"}"
     puts "Nickname: #{@nickname}"
     puts "Environment: #{@environment}"
     puts "Server: #{@server_url}"
@@ -322,11 +352,11 @@ class GentilityAgent
       scheme: (uri.scheme == "https" || uri.scheme == "wss") ? "wss" : "ws",
       host: uri.host,
       port: uri.port,
-      path: "/agent/ws/websocket",
+      path: "/agent/websocket",
       query: URI::Params.build do |params|
-        if @public_key
-          # Machine key mode: send public key
-          params.add "access_key", @public_key.not_nil!
+        if @machine_key
+          # Machine key mode: send the full machine key
+          params.add "machine_key", @machine_key.not_nil!
         elsif @oauth_token
           # OAuth mode: send OAuth token
           params.add "oauth_token", @oauth_token.not_nil!
@@ -335,6 +365,11 @@ class GentilityAgent
         params.add "security_mode", Security.mode
         params.add "security_enabled", (Security.mode != "none").to_s
         params.add "security_active", Security.unlocked?.to_s
+
+        # Add X25519 public key for secure credential exchange
+        if @x25519_public_key
+          params.add "x25519_pubkey", Base64.strict_encode(@x25519_public_key.not_nil!)
+        end
       end
     )
 
@@ -401,6 +436,27 @@ class GentilityAgent
       puts "✅ Connected to server!"
       machine_id = msg["machine_id"]?.try(&.to_s)
       puts "Machine ID: #{machine_id}" if machine_id
+
+      # Handle server's X25519 public key and derive shared secret
+      if server_x25519_b64 = msg["server_x25519_pubkey"]?.try(&.to_s)
+        if @x25519_private_key
+          begin
+            server_pubkey = Base64.decode(server_x25519_b64)
+
+            if server_pubkey.size != 32
+              puts "Warning: Invalid server X25519 public key size" if @debug
+            else
+              # Derive shared secret using ECDH
+              @x25519_shared_secret = AgentCrypto.x25519_ecdh(@x25519_private_key.not_nil!, server_pubkey)
+              puts "✅ Shared secret established for secure credential exchange" if @debug
+            end
+          rescue ex
+            puts "Warning: Failed to derive shared secret: #{ex.message}" if @debug
+          end
+        else
+          puts "Warning: Server sent X25519 public key but agent has no X25519 private key" if @debug
+        end
+      end
     when "error"
       # Handle error messages from server
       error_code = msg["error"]?.try(&.to_s)
@@ -745,6 +801,74 @@ class GentilityAgent
       else
         {"error" => "Missing db_target_id or credentials parameter"}
       end
+    when "secure_psql_query"
+      return {"error" => "Agent unlock required for database queries"} unless Security.unlocked?
+      return {"error" => "Shared secret required for secure queries"} unless @x25519_shared_secret
+      Security.extend_unlock
+
+      encrypted_payload = params.try(&.["encrypted_payload"]?.try(&.to_s))
+      query = params.try(&.["query"]?.try(&.to_s))
+
+      if encrypted_payload && query
+        begin
+          # Decrypt credentials using shared secret (IV is embedded in payload)
+          creds_json = AgentCrypto.decrypt_with_shared_secret(
+            @x25519_shared_secret.not_nil!,
+            encrypted_payload
+          )
+
+          # Parse credentials JSON
+          creds = JSON.parse(creds_json)
+          host = creds["host"]?.try(&.as_s)
+          port = creds["port"]?.try(&.as_i)
+          dbname = creds["database"]?.try(&.as_s)
+          username = creds["username"]?.try(&.as_s)
+          password = creds["password"]?.try(&.as_s)
+
+          if host && port && dbname
+            execute_psql_query(host, port, dbname, query, username, password)
+          else
+            {"error" => "Invalid decrypted credentials"}
+          end
+        rescue ex : Exception
+          {"error" => "Failed to decrypt credentials: #{ex.message}"}
+        end
+      else
+        {"error" => "Missing required parameters: encrypted_payload, query"}
+      end
+    when "secure_mysql_query"
+      return {"error" => "Agent unlock required for database queries"} unless Security.unlocked?
+      return {"error" => "Shared secret required for secure queries"} unless @x25519_shared_secret
+      Security.extend_unlock
+
+      encrypted_payload = params.try(&.["encrypted_payload"]?.try(&.to_s))
+      query = params.try(&.["query"]?.try(&.to_s))
+
+      if encrypted_payload && query
+        begin
+          # Decrypt credentials using shared secret (IV is embedded in payload)
+          creds_json = AgentCrypto.decrypt_with_shared_secret(
+            @x25519_shared_secret.not_nil!,
+            encrypted_payload
+          )
+
+          # Parse credentials JSON
+          creds = JSON.parse(creds_json)
+          host = creds["host"]?.try(&.as_s)
+          port = creds["port"]?.try(&.as_i)
+          dbname = creds["database"]?.try(&.as_s)
+
+          if host && port && dbname
+            execute_mysql_query(host, port, dbname, query)
+          else
+            {"error" => "Invalid decrypted credentials"}
+          end
+        rescue ex : Exception
+          {"error" => "Failed to decrypt credentials: #{ex.message}"}
+        end
+      else
+        {"error" => "Missing required parameters: encrypted_payload, query"}
+      end
     else
       {"error" => "Unknown command: #{command}"}
     end
@@ -1010,4 +1134,4 @@ class GentilityAgent
 end
 
 # Only run main when not in spec mode
-main unless ENV["CRYSTAL_SPEC"]? == "true"
+main() unless ENV["CRYSTAL_SPEC"]? == "true"

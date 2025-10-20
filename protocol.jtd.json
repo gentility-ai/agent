@@ -4,7 +4,7 @@
   "metadata": {
     "title": "Gentility AI Agent WebSocket Protocol",
     "description": "JSON Type Definition schema for WebSocket messages between Gentility AI server and agents",
-    "version": "1.0.25"
+    "version": "1.1.0"
   },
   "definitions": {
     "MessageBase": {
