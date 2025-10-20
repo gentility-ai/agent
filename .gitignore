@@ -5,7 +5,7 @@
 /.shards/
 *.dwarf
 
-# Environment and secrets 
+# Environment and secrets
 .env
 .env.*
 *.key
@@ -65,7 +65,7 @@ homebrew-agent
 notes/
 
 # build artefact
-agent
+/agent
 
 # Worktrees
 .worktrees/
