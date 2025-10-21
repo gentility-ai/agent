@@ -737,6 +737,19 @@ class AgentProvisioner
   private def save_machine_key(machine_key : String, org_id : String?, environment : String?, nickname : String?)
     config_file = AgentConfig.get_config_path
 
+    # Check write permissions early before doing any work
+    config_dir = File.dirname(config_file)
+
+    if File.exists?(config_file)
+      unless File::Info.writable?(config_file)
+        raise "Permission denied: Cannot write to #{config_file}. Try running with sudo."
+      end
+    else
+      unless File::Info.writable?(config_dir)
+        raise "Permission denied: Cannot write to directory #{config_dir}. Try running with sudo."
+      end
+    end
+
     # Read existing config or create new one
     config = if File.exists?(config_file)
                YAML.parse(File.read(config_file))
@@ -1223,6 +1236,28 @@ def main
       else
         puts "Unknown option: #{ARGV[i]}"
         puts "Usage: gentility auth [-e <env>] [--headless] [--debug] [--org <id>] [--environment <name>] [--nickname <name>]"
+        exit 1
+      end
+    end
+
+    # Check write permissions BEFORE starting OAuth flow
+    config_file = AgentConfig.get_config_path
+    config_dir = File.dirname(config_file)
+
+    if File.exists?(config_file)
+      unless File::Info.writable?(config_file)
+        puts "❌ Permission denied: Cannot write to #{config_file}"
+        puts ""
+        puts "Please run with elevated privileges:"
+        puts "  sudo gentility auth"
+        exit 1
+      end
+    else
+      unless File::Info.writable?(config_dir)
+        puts "❌ Permission denied: Cannot write to directory #{config_dir}"
+        puts ""
+        puts "Please run with elevated privileges:"
+        puts "  sudo gentility auth"
         exit 1
       end
     end
