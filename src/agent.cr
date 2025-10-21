@@ -114,8 +114,14 @@ class GentilityAgent
     config = AgentConfig.load_config_from_file(config_file)
     return Security.configure("none", nil, nil, 1800, true, true, "password", true, 5, "temporary", 900) unless config
 
+    # Handle empty/nil config
+    config_hash = config.as_h?
+    return Security.configure("none", nil, nil, 1800, true, true, "password", true, 5, "temporary", 900) unless config_hash
+
     # Support both YAML security section and legacy flat keys
-    security_config = config["security"]? || config
+    # Handle case where security: exists but is nil/empty
+    security_any = config["security"]?
+    security_config = (security_any && security_any.as_h?) ? security_any : config
 
     mode = security_config["mode"]?.try(&.as_s?) ||
            security_config["SECURITY_MODE"]?.try(&.as_s?) || "none"
@@ -141,7 +147,9 @@ class GentilityAgent
                             security_config["PROMISCUOUS_AUTH_MODE"]?.try(&.as_s?) || "password"
 
     # Load rate limiting config (nested under security.rate_limiting or flat)
-    rate_limiting_config = security_config["rate_limiting"]? || security_config
+    # Handle case where rate_limiting: exists but is nil/empty
+    rate_limiting_any = security_config["rate_limiting"]?
+    rate_limiting_config = (rate_limiting_any && rate_limiting_any.as_h?) ? rate_limiting_any : security_config
 
     rate_limiting_enabled = rate_limiting_config["enabled"]?.try(&.as_bool?) || true
     max_attempts = rate_limiting_config["max_attempts"]?.try(&.as_i?) || 5
