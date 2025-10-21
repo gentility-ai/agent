@@ -56,27 +56,26 @@ class GentilityAgent
   @running : Bool = false
   @graceful_shutdown : Bool = false
   @ping_fiber : Fiber?
-  @debug : Bool = false
   @signing_key : Ed25519::SigningKey?
   @public_key : String?
   @x25519_private_key : Bytes?
   @x25519_public_key : Bytes?
   @x25519_shared_secret : Bytes?
 
-  def initialize(access_key : String, @server_url : String, @nickname : String, @environment : String = "prod", @debug : Bool = false)
+  def initialize(access_key : String, @server_url : String, @nickname : String, @environment : String = "prod")
     # Determine if this is a machine_key or oauth_token based on prefix
     if access_key.starts_with?("genkey-agent-")
       @machine_key = access_key
       @oauth_token = nil
       @signing_key = nil
       @public_key = nil
-      puts "Using machine key authentication" if @debug
+      puts "Using machine key authentication" if CLI.debug_mode
     else
       @machine_key = nil
       @oauth_token = access_key
       @signing_key = nil
       @public_key = nil
-      puts "Using OAuth token authentication" if @debug
+      puts "Using OAuth token authentication" if CLI.debug_mode
     end
 
     load_security_config
@@ -93,20 +92,20 @@ class GentilityAgent
         seed_bytes = Base58.decode(seed_key_b58).to_slice
 
         if seed_bytes.size != 32
-          puts "Warning: Invalid ed25519_seed_key size (#{seed_bytes.size} bytes, expected 32)" if @debug
+          puts "Warning: Invalid ed25519_seed_key size (#{seed_bytes.size} bytes, expected 32)" if CLI.debug_mode
           return
         end
 
         # Derive X25519 keypair from Ed25519 seed
         @x25519_private_key, @x25519_public_key = AgentCrypto.ed25519_seed_to_x25519_keypair(seed_bytes)
 
-        puts "X25519 keypair derived from ed25519_seed_key" if @debug
-        puts "X25519 Public Key: #{Base64.strict_encode(@x25519_public_key.not_nil!)}" if @debug
+        puts "X25519 keypair derived from ed25519_seed_key" if CLI.debug_mode
+        puts "X25519 Public Key: #{Base64.strict_encode(@x25519_public_key.not_nil!)}" if CLI.debug_mode
       rescue ex
-        puts "Warning: Failed to load X25519 keys: #{ex.message}" if @debug
+        puts "Warning: Failed to load X25519 keys: #{ex.message}" if CLI.debug_mode
       end
     else
-      puts "No ed25519_seed_key found in config - secure query features will be unavailable" if @debug
+      puts "No ed25519_seed_key found in config - secure query features will be unavailable" if CLI.debug_mode
     end
   end
 
@@ -262,7 +261,7 @@ class GentilityAgent
     puts "Nickname: #{@nickname}"
     puts "Environment: #{@environment}"
     puts "Server: #{@server_url}"
-    puts "Debug mode: #{@debug ? "enabled" : "disabled"}"
+    puts "Debug mode: #{CLI.debug_mode ? "enabled" : "disabled"}"
     puts ""
     puts ""
 
@@ -335,7 +334,7 @@ class GentilityAgent
   end
 
   private def debug_log(message : String)
-    if @debug
+    if CLI.debug_mode
       puts "[DEBUG] #{Time.local.to_s("%Y-%m-%d %H:%M:%S")} #{message}"
     end
   end
@@ -438,23 +437,36 @@ class GentilityAgent
       puts "Machine ID: #{machine_id}" if machine_id
 
       # Handle server's X25519 public key and derive shared secret
-      if server_x25519_b64 = msg["server_x25519_pubkey"]?.try(&.to_s)
+      if server_x25519_b64 = msg["x25519_pubkey"]?.try(&.to_s)
         if @x25519_private_key
           begin
             server_pubkey = Base64.decode(server_x25519_b64)
 
             if server_pubkey.size != 32
-              puts "Warning: Invalid server X25519 public key size" if @debug
+              puts "Warning: Invalid server X25519 public key size (got #{server_pubkey.size} bytes)" if CLI.debug_mode
             else
               # Derive shared secret using ECDH
               @x25519_shared_secret = AgentCrypto.x25519_ecdh(@x25519_private_key.not_nil!, server_pubkey)
-              puts "✅ Shared secret established for secure credential exchange" if @debug
+
+              if CLI.debug_mode
+                shared_secret_b64 = Base64.strict_encode(@x25519_shared_secret.not_nil!)
+                # Validate the shared secret
+                if @x25519_shared_secret.not_nil!.all? { |b| b == 0 }
+                  puts "⚠️  Warning: Shared secret is all zeros (ECDH may have failed)"
+                elsif @x25519_shared_secret.not_nil!.size != 32
+                  puts "⚠️  Warning: Shared secret has invalid size: #{@x25519_shared_secret.not_nil!.size} bytes"
+                else
+                  puts "✅ Shared secret established for secure credential exchange"
+                  puts "   Shared Secret (base64): #{shared_secret_b64}"
+                  puts "   Size: #{@x25519_shared_secret.not_nil!.size} bytes"
+                end
+              end
             end
           rescue ex
-            puts "Warning: Failed to derive shared secret: #{ex.message}" if @debug
+            puts "Warning: Failed to derive shared secret: #{ex.message}" if CLI.debug_mode
           end
         else
-          puts "Warning: Server sent X25519 public key but agent has no X25519 private key" if @debug
+          puts "Warning: Server sent X25519 public key but agent has no X25519 private key" if CLI.debug_mode
         end
       end
     when "error"
@@ -530,6 +542,63 @@ class GentilityAgent
       rescue ex : Exception
         send_error(request_id, ex.message || "Unknown error")
       end
+    end
+  end
+
+  private def handle_ecdh_test(msg : JSON::Any)
+    puts "Received ECDH test request"
+
+    version = msg["v"]?.try(&.as_i?) || 1
+    cleartext = msg["cleartext"]?.try(&.to_s)
+    ciphertext_b64 = msg["ciphertext"]?.try(&.to_s)
+
+    unless cleartext && ciphertext_b64
+      puts "Error: Missing cleartext or ciphertext in ecdh_test"
+      return
+    end
+
+    unless @x25519_shared_secret
+      puts "Error: No shared secret established - cannot perform ECDH test"
+      send_message({
+        "type" => "ecdh_test_response",
+        "v" => version,
+        "success" => false,
+        "error" => "No shared secret established"
+      })
+      return
+    end
+
+    begin
+      # Decrypt using the shared secret
+      decrypted = AgentCrypto.decrypt_with_shared_secret(@x25519_shared_secret.not_nil!, ciphertext_b64)
+
+      # Extract IV from ciphertext
+      ciphertext = Base64.decode(ciphertext_b64)
+      iv = ciphertext[0...16]
+      iv_b64 = Base64.strict_encode(iv)
+
+      # Check if decrypted matches cleartext
+      success = (decrypted == cleartext)
+
+      puts "ECDH Test: #{success ? "✅ SUCCESS" : "❌ FAILED"}"
+      puts "  Expected: #{cleartext}"
+      puts "  Got: #{decrypted}"
+
+      send_message({
+        "type" => "ecdh_test_response",
+        "v" => version,
+        "success" => success,
+        "iv" => iv_b64,
+        "payload" => decrypted
+      })
+    rescue ex
+      puts "ECDH Test Failed: #{ex.message}"
+      send_message({
+        "type" => "ecdh_test_response",
+        "v" => version,
+        "success" => false,
+        "error" => ex.message || "Decryption failed"
+      })
     end
   end
 
@@ -868,6 +937,45 @@ class GentilityAgent
         end
       else
         {"error" => "Missing required parameters: encrypted_payload, query"}
+      end
+    when "ecdh_test"
+      # Test ECDH encryption/decryption
+      version = params.try(&.["version"]?.try(&.as_i?)) || 1
+      cleartext = params.try(&.["cleartext"]?.try(&.to_s))
+      ciphertext_b64 = params.try(&.["ciphertext"]?.try(&.to_s))
+
+      unless cleartext && ciphertext_b64
+        return {"error" => "Missing required parameters: cleartext, ciphertext"}
+      end
+
+      unless @x25519_shared_secret
+        return {"error" => "No shared secret established - ECDH not available"}
+      end
+
+      begin
+        # Decrypt using the shared secret (expects base64 input)
+        decrypted = AgentCrypto.decrypt_with_shared_secret(@x25519_shared_secret.not_nil!, ciphertext_b64)
+
+        # Extract IV (first 16 bytes of decoded ciphertext)
+        ciphertext = Base64.decode(ciphertext_b64)
+        iv = ciphertext[0...16]
+        iv_b64 = Base64.strict_encode(iv)
+
+        # Check if decrypted text matches cleartext
+        success = (decrypted == cleartext)
+
+        {
+          "v"       => version,
+          "success" => success,
+          "iv"      => iv_b64,
+          "payload" => decrypted,
+        }
+      rescue ex
+        {
+          "v"       => version,
+          "success" => false,
+          "error"   => ex.message || "Decryption failed",
+        }
       end
     else
       {"error" => "Unknown command: #{command}"}

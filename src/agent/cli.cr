@@ -10,6 +10,18 @@ require "./oauth"
 
 # CLI functions for the Gentility Agent
 
+module CLI
+  @@debug_mode = false
+
+  def self.debug_mode
+    @@debug_mode
+  end
+
+  def self.debug_mode=(value : Bool)
+    @@debug_mode = value
+  end
+end
+
 # Configuration and argument parsing
 def parse_arguments
   # 1. Start with defaults
@@ -135,7 +147,7 @@ def parse_arguments
     server_url = AgentConfig::ServerURLs.websocket_url(environment)
   end
 
-  {access_key, server_url, nickname, environment, debug}
+  {access_key, server_url, nickname, environment}
 end
 
 def setup_config(token : String)
@@ -1086,7 +1098,7 @@ end
 
 def main
   # Parse global --debug flag first (works with any command)
-  debug = ARGV.includes?("--debug")
+  CLI.debug_mode = ARGV.includes?("--debug")
   ARGV.delete("--debug")
 
   # Show help if no arguments or help requested
@@ -1184,7 +1196,7 @@ def main
       end
     end
 
-    run_oauth_flow(environment, headless, debug, org_id, env_name, nickname)
+    run_oauth_flow(environment, headless, CLI.debug_mode, org_id, env_name, nickname)
     exit 0
   end
 
@@ -1274,9 +1286,9 @@ def main
     end
   end
 
-  access_key, server_url, nickname, environment, debug = parse_arguments
+  access_key, server_url, nickname, environment = parse_arguments
 
-  agent = GentilityAgent.new(access_key, server_url, nickname, environment, debug)
+  agent = GentilityAgent.new(access_key, server_url, nickname, environment)
 
   # Handle graceful shutdown
   Signal::INT.trap do
