@@ -229,8 +229,8 @@ def setup_config(token : String)
     # Write the config file
     File.write(config_file, config_content)
 
-    # Set proper permissions (readable only by root)
-    File.chmod(config_file, 0o600)
+    # Set proper permissions (readable by gentility group)
+    File.chmod(config_file, 0o640)
 
     puts "✅ Configuration saved to #{config_file}"
     puts ""
@@ -776,7 +776,18 @@ class AgentProvisioner
 
     # Write config
     File.write(config_file, config_hash.to_yaml)
-    File.chmod(config_file, 0o600)
+    File.chmod(config_file, 0o640)
+
+    # Set ownership to gentility:gentility on Linux
+    {% if flag?(:linux) %}
+      begin
+        # Try to set ownership - this requires running as root
+        Process.run("chown", ["gentility:gentility", config_file])
+      rescue ex
+        # If we can't chown (not running as root), that's okay
+        # The file will be readable by root which is fine for manual runs
+      end
+    {% end %}
   end
 end
 
@@ -906,7 +917,7 @@ def clear_lockout_from_cli
 
       # Write updated config
       File.write(config_file, config_hash.to_yaml)
-      File.chmod(config_file, 0o600)
+      File.chmod(config_file, 0o640)
 
       puts "🔐 Lockout Cleared"
       puts "================="

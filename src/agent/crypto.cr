@@ -107,7 +107,7 @@ module AgentCrypto
 
     # Write back to file
     File.write(config_file, config_hash.to_yaml)
-    File.chmod(config_file, 0o600)
+    File.chmod(config_file, 0o640)
   end
 
   # Load and decrypt credentials from config file

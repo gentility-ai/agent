@@ -95,7 +95,7 @@ module AgentConfig
     end
 
     File.write(config_file, lines.join("\n") + "\n")
-    File.chmod(config_file, 0o600)
+    File.chmod(config_file, 0o640)
   end
 
   # Remove config keys
@@ -110,6 +110,6 @@ module AgentConfig
     end
 
     File.write(config_file, lines.join("\n") + "\n")
-    File.chmod(config_file, 0o600)
+    File.chmod(config_file, 0o640)
   end
 end

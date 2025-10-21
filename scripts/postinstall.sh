@@ -102,9 +102,9 @@ YAML_HEADER
     echo "# Encrypted database credentials (managed by server)" >> /etc/gentility.yaml
     echo "encrypted_db_credentials: {}" >> /etc/gentility.yaml
 
-    # Set proper permissions
-    chmod 600 /etc/gentility.yaml
-    chown root:root /etc/gentility.yaml
+    # Set proper permissions - readable by gentility user
+    chmod 640 /etc/gentility.yaml
+    chown gentility:gentility /etc/gentility.yaml
 
     # Backup old config
     mv /etc/gentility.conf /etc/gentility.conf.bak
@@ -114,8 +114,8 @@ fi
 # Create default config file if it doesn't exist
 if [ ! -f /etc/gentility.yaml ]; then
     cp /etc/gentility.yaml.example /etc/gentility.yaml
-    chmod 600 /etc/gentility.yaml
-    chown root:root /etc/gentility.yaml
+    chmod 640 /etc/gentility.yaml
+    chown gentility:gentility /etc/gentility.yaml
 fi
 
 # Reload systemd and enable the service

@@ -219,7 +219,7 @@ class GentilityAgent
 
     # Write updated config
     File.write(config_file, config_hash.to_yaml)
-    File.chmod(config_file, 0o600)
+    File.chmod(config_file, 0o640)
   rescue ex : Exception
     puts "Warning: Could not save security configuration to file: #{ex.message}"
   end
