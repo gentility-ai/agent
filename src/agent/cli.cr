@@ -381,7 +381,38 @@ end
 
 def is_ssh_session? : Bool
   # Check for SSH environment variables
-  ENV.has_key?("SSH_CONNECTION") || ENV.has_key?("SSH_CLIENT") || ENV.has_key?("SSH_TTY")
+  # Note: sudo strips these by default, so we need additional checks
+
+  # Direct SSH check
+  return true if ENV.has_key?("SSH_CONNECTION") || ENV.has_key?("SSH_CLIENT") || ENV.has_key?("SSH_TTY")
+
+  # If running under sudo, check if the parent process is SSH
+  if ENV.has_key?("SUDO_USER")
+    # Check if any parent process is sshd
+    begin
+      # Get parent processes
+      ppid = Process.ppid
+      loop do
+        break if ppid <= 1
+
+        # Read process command line
+        cmdline = File.read("/proc/#{ppid}/cmdline").gsub('\0', ' ').strip rescue ""
+        return true if cmdline.includes?("sshd")
+
+        # Get parent of parent
+        stat = File.read("/proc/#{ppid}/stat").strip rescue ""
+        if match = stat.match(/\d+\s+\([^)]+\)\s+\w+\s+(\d+)/)
+          ppid = match[1].to_i
+        else
+          break
+        end
+      end
+    rescue
+      # If we can't check /proc, fall back to other heuristics
+    end
+  end
+
+  false
 end
 
 def run_oauth_flow(environment : String, headless : Bool, debug : Bool, org_id : String?, env_name : String?, nickname : String?)
