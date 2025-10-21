@@ -33,6 +33,27 @@ def parse_arguments
 
   # 2. Load configuration from file if it exists
   config_file = AgentConfig.get_config_path
+
+  # Check if config file exists but isn't readable/writable
+  if File.exists?(config_file)
+    unless File::Info.readable?(config_file) && File::Info.writable?(config_file)
+      puts "❌ ERROR: Permission denied"
+      puts ""
+      puts "Cannot read/write config file: #{config_file}"
+      puts ""
+      puts "The agent needs read and write access to the configuration file."
+      puts ""
+      puts "Fix permissions with:"
+      puts "  sudo chown gentility:gentility #{config_file}"
+      puts "  sudo chmod 640 #{config_file}"
+      puts ""
+      puts "Or if running manually (not as a service):"
+      puts "  sudo chown $USER:$USER #{config_file}"
+      puts "  sudo chmod 600 #{config_file}"
+      exit 1
+    end
+  end
+
   config = AgentConfig.load_config_from_file(config_file)
 
   # Apply config file settings (YAML format)
