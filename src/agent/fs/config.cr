@@ -2,17 +2,23 @@ require "json"
 
 module AgentFS
   # Base directory for filesystem management
-  BASE_DIR = if Process.uid == 0
-    Path.new("/var/lib/gentility/fs")
-  else
-    Path.home / ".config" / "gentility" / "fs"
+  BASE_DIR = begin
+    uid = LibC.getuid
+    if uid == 0
+      Path.new("/var/lib/gentility/fs")
+    else
+      Path.home / ".config" / "gentility" / "fs"
+    end
   end
 
   # Unix socket path for agent communication
-  SOCKET_PATH = if Process.uid == 0
-    Path.new("/run/gentility/agent.sock")
-  else
-    Path.home / ".config" / "gentility" / "agent.sock"
+  SOCKET_PATH = begin
+    uid = LibC.getuid
+    if uid == 0
+      Path.new("/run/gentility/agent.sock")
+    else
+      Path.home / ".config" / "gentility" / "agent.sock"
+    end
   end
 
   class RepoConfig

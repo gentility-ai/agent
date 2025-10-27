@@ -33,6 +33,7 @@ require "base58"
 require "crypto/subtle"
 require "openssl"
 require "base64"
+require "socket"
 
 # Agent modules
 require "./agent/oauth"
@@ -62,6 +63,7 @@ class GentilityAgent
   @x25519_private_key : Bytes?
   @x25519_public_key : Bytes?
   @x25519_shared_secret : Bytes?
+  @rpc_server : UNIXServer?
 
   def initialize(access_key : String, @server_url : String, @nickname : String, @environment : String = "prod")
     # Determine if this is a machine_key or oauth_token based on prefix
@@ -334,6 +336,9 @@ class GentilityAgent
 
     # Close WebSocket
     @websocket.try(&.close)
+
+    # Stop RPC server
+    @rpc_server.try(&.close)
   end
 
   def reload_security_config
@@ -414,6 +419,9 @@ class GentilityAgent
 
       # Start ping mechanism
       start_ping_loop
+
+      # Start Unix socket RPC server for fs commands
+      start_rpc_server
 
       # Send initial status
       send_status
@@ -1249,6 +1257,52 @@ class GentilityAgent
       puts "Error sending message: #{ex.message}"
       debug_log("→ Send error: #{ex.message}")
     end
+  end
+
+  private def start_rpc_server
+    socket_path = AgentFS::SOCKET_PATH
+
+    # Clean up stale socket
+    File.delete(socket_path) if File.exists?(socket_path)
+
+    # Ensure parent directory exists
+    Dir.mkdir_p(socket_path.parent)
+
+    # Create Unix socket server
+    @rpc_server = UNIXServer.new(socket_path.to_s)
+
+    # Spawn fiber to handle RPC requests
+    spawn do
+      # Create storage and RPC handler
+      storage = AgentFS::Storage.new(AgentFS::BASE_DIR.to_s)
+      rpc_handler = AgentFS::RPCServer.new(storage)
+
+      while @running
+        if server = @rpc_server
+          if client = server.accept?
+            spawn handle_rpc_client(client, rpc_handler)
+          end
+        else
+          break
+        end
+      end
+    rescue ex : Exception
+      puts "RPC server error: #{ex.message}" unless @graceful_shutdown
+    end
+
+    puts "RPC server listening on #{socket_path}"
+  rescue ex : Exception
+    puts "Failed to start RPC server: #{ex.message}"
+  end
+
+  private def handle_rpc_client(client : UNIXSocket, rpc : AgentFS::RPCServer)
+    request = client.gets
+    return unless request
+
+    response = rpc.handle(request)
+    client.puts(response)
+  ensure
+    client.close
   end
 end
 
