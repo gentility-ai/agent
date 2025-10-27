@@ -1,5 +1,7 @@
 require "json"
 require "./storage"
+require "./commands/open"
+require "./commands/close"
 
 module AgentFS
   class RPCServer
@@ -14,6 +16,12 @@ module AgentFS
       when "status"
         handle_status
       when "list_mounts"
+        handle_list_mounts
+      when "fs.open"
+        handle_open(req["params"]?)
+      when "fs.close"
+        handle_close(req["params"]?)
+      when "fs.list"
         handle_list_mounts
       else
         {"error" => "Unknown method: #{method}"}
@@ -83,6 +91,30 @@ module AgentFS
       else
         "inactive"
       end
+    end
+
+    private def handle_open(params)
+      repo_name = params.try(&.["repo"]?).try(&.as_s?)
+      path = params.try(&.["path"]?).try(&.as_s?)
+
+      cmd = Commands::Open.new(@storage, repo_name, path)
+      success = cmd.execute
+
+      if success
+        {"status" => "success", "message" => "Mount opened"}
+      else
+        {"status" => "error", "message" => "Failed to open mount"}
+      end
+    end
+
+    private def handle_close(params)
+      path = params.try(&.["path"]?).try(&.as_s)
+      raise "Missing required parameter: path" unless path
+
+      cmd = Commands::Close.new(@storage, path)
+      cmd.execute
+
+      {"status" => "success", "message" => "Mount closed"}
     end
   end
 end

@@ -100,7 +100,7 @@ module AgentFS::Commands
     end
 
     private def ensure_repo_exists(repo_name : String)
-      repo_path = Config::BASE_DIR / "repos" / repo_name
+      repo_path = AgentFS::BASE_DIR / "repos" / repo_name
 
       unless Dir.exists?(repo_path)
         # Repo doesn't exist - need to import from server
