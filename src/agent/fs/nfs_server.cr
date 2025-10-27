@@ -1,6 +1,6 @@
 require "process"
 
-module JJFS
+module AgentFS
   class NFSServer
     getter port : Int32
     getter pid : Int64?
@@ -15,9 +15,7 @@ module JJFS
     end
 
     def start : Bool
-      # Find jjfs-nfs binary (should be in same directory as jjfs)
-      bin_dir = File.dirname(Process.executable_path.not_nil!)
-      nfs_binary = File.join(bin_dir, "jjfs-nfs")
+      nfs_binary = nfs_binary_path
 
       unless File.exists?(nfs_binary)
         puts "Error: jjfs-nfs binary not found at #{nfs_binary}"
@@ -68,6 +66,19 @@ module JJFS
       end
 
       false
+    end
+
+    private def nfs_binary_path : String
+      # Try bundled location first
+      bundled = Path.new(Process.executable_path.not_nil!).parent / "jjfs-nfs"
+      return bundled.to_s if File.exists?(bundled)
+
+      # Try libexec location
+      libexec = Path.new("/usr/local/libexec/gentility/jjfs-nfs")
+      return libexec.to_s if File.exists?(libexec)
+
+      # Fall back to PATH
+      "jjfs-nfs"
     end
 
     private def find_available_port : Int32
