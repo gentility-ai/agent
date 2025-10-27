@@ -245,7 +245,7 @@ describe "Database Commands" do
       access_key = Base58.encode(signing_key.key_bytes)
 
       # Agent should initialize successfully
-      agent = GentilityAgent.new(access_key, "ws://localhost:9000", "test-agent", "test", false)
+      agent = GentilityAgent.new(access_key, "ws://localhost:9000", "test-agent", "test")
       agent.should_not be_nil
     end
 
@@ -256,7 +256,7 @@ describe "Database Commands" do
       access_key = Base58.encode(signing_key.key_bytes)
 
       # Agent should initialize successfully
-      agent = GentilityAgent.new(access_key, "ws://localhost:9000", "test-agent", "test", false)
+      agent = GentilityAgent.new(access_key, "ws://localhost:9000", "test-agent", "test")
       agent.should_not be_nil
     end
   end
