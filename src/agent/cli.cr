@@ -1375,10 +1375,29 @@ def main
         puts "Usage: #{PROGRAM_NAME} promiscuous <enable|disable|status|auth>"
         exit 1
       end
+    when "fs"
+      if ARGV.size >= 2
+        handle_fs_command(ARGV[1..-1])
+      else
+        puts "Usage: #{PROGRAM_NAME} fs <subcommand>"
+        puts ""
+        puts "Subcommands:"
+        puts "  open <path>        - Mount filesystem share"
+        puts "  close <path>       - Unmount filesystem share"
+        puts "  list               - List available shares"
+        puts "  status             - Show mount status"
+        exit 1
+      end
+    when "open"
+      # Shorthand for "fs open"
+      handle_fs_open(ARGV[1..-1])
+    when "close"
+      # Shorthand for "fs close"
+      handle_fs_close(ARGV[1..-1])
     else
       puts "Unknown command: #{ARGV[0]}"
       puts ""
-      puts "Available commands: run, start, status, setup, security, test-totp, promiscuous, version, help"
+      puts "Available commands: run, start, status, setup, security, test-totp, promiscuous, fs, open, close, version, help"
       puts "For detailed help: gentility help or gentility -h"
       exit 1
     end
@@ -1410,4 +1429,58 @@ def main
   end
 
   agent.start
+end
+
+# Filesystem command handlers
+def handle_fs_command(args : Array(String))
+  if args.empty?
+    puts "Usage: gentility fs <subcommand>"
+    puts ""
+    puts "Subcommands:"
+    puts "  open <path>        - Mount filesystem share"
+    puts "  close <path>       - Unmount filesystem share"
+    puts "  list               - List available shares"
+    puts "  status             - Show mount status"
+    exit 1
+  end
+
+  subcommand = args[0]
+
+  case subcommand
+  when "open"
+    handle_fs_open(args[1..-1])
+  when "close"
+    handle_fs_close(args[1..-1])
+  when "list"
+    handle_fs_list(args[1..-1])
+  when "status"
+    handle_fs_status(args[1..-1])
+  else
+    puts "Unknown fs subcommand: #{subcommand}"
+    exit 1
+  end
+end
+
+def handle_fs_open(args : Array(String))
+  # TODO: Implement via RPC client
+  puts "fs open - not yet implemented"
+  exit 1
+end
+
+def handle_fs_close(args : Array(String))
+  # TODO: Implement via RPC client
+  puts "fs close - not yet implemented"
+  exit 1
+end
+
+def handle_fs_list(args : Array(String))
+  # TODO: Implement via RPC client
+  puts "fs list - not yet implemented"
+  exit 1
+end
+
+def handle_fs_status(args : Array(String))
+  # TODO: Implement via RPC client
+  puts "fs status - not yet implemented"
+  exit 1
 end
