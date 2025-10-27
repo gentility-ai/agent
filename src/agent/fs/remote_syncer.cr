@@ -1,7 +1,7 @@
 require "./storage"
 require "log"
 
-module JJFS
+module AgentFS
   class RemoteSyncer
     Log = ::Log.for(self)
 
