@@ -49,7 +49,7 @@ module AgentDatabase
 
   # Execute database command and parse results
   private def self.execute_db_command(command : String, delimiter : String, db_type : String)
-    puts "Executing: #{command}"
+    puts "Executing: #{command}" if CLI.debug_mode
 
     process = Process.new(
       command,

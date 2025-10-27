@@ -513,14 +513,16 @@ class GentilityAgent
       send_message(response)
     when "pong"
       # Handle pong response (server responding to our ping)
-      timestamp = msg["timestamp"]?.try(&.as_f?)
-      if timestamp
-        # Calculate round-trip time if we want
-        current_time = Time.utc.to_unix_f
-        rtt = current_time - timestamp
-        puts "Received pong from server (RTT: #{(rtt * 1000).round(2)}ms)" if rtt > 0
-      else
-        puts "Received pong from server"
+      if CLI.debug_mode
+        timestamp = msg["timestamp"]?.try(&.as_f?)
+        if timestamp
+          # Calculate round-trip time if we want
+          current_time = Time.utc.to_unix_f
+          rtt = current_time - timestamp
+          puts "Received pong from server (RTT: #{(rtt * 1000).round(2)}ms)" if rtt > 0
+        else
+          puts "Received pong from server"
+        end
       end
     when "command"
       handle_command(msg)
@@ -1054,7 +1056,7 @@ class GentilityAgent
   end
 
   private def execute_shell_command(cmd : String)
-    puts "Executing: #{cmd}"
+    puts "Executing: #{cmd}" if CLI.debug_mode
 
     begin
       process = Process.new(
@@ -1221,8 +1223,8 @@ class GentilityAgent
       loop do
         break unless @running && @websocket && !@websocket.not_nil!.closed?
 
-        # Send ping every 30 seconds
-        sleep 30.seconds
+        # Send ping every 60 seconds
+        sleep 60.seconds
 
         if @websocket && !@websocket.not_nil!.closed?
           send_message({"type" => "ping", "timestamp" => Time.utc.to_unix_f})
