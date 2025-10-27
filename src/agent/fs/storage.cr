@@ -1,7 +1,7 @@
 require "file_utils"
 require "./config"
 
-module JJFS
+module AgentFS
   class Storage
     DEFAULT_ROOT = File.join(ENV["HOME"], ".jjfs")
 
