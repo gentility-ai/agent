@@ -2,7 +2,7 @@ require "uuid"
 require "./storage"
 require "./nfs_server"
 
-module JJFS
+module AgentFS
   class MountManager
     def initialize(@storage : Storage)
     end
