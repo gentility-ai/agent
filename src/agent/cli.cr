@@ -1462,25 +1462,144 @@ def handle_fs_command(args : Array(String))
 end
 
 def handle_fs_open(args : Array(String))
-  # TODO: Implement via RPC client
-  puts "fs open - not yet implemented"
-  exit 1
+  if args.empty?
+    puts "Usage: gentility open [repo] <path>"
+    puts ""
+    puts "Examples:"
+    puts "  gentility open .                    # Mount default share in current dir"
+    puts "  gentility open ~/Documents/notes    # Mount default share at path"
+    puts "  gentility open acme/shared .        # Mount specific repo"
+    exit 1
+  end
+
+  # Parse arguments
+  repo_name = nil
+  mount_path = nil
+
+  if args.size == 1
+    # gentility open <path> - use default repo
+    mount_path = args[0]
+  elsif args.size == 2
+    # gentility open <repo> <path>
+    repo_name = args[0]
+    mount_path = args[1]
+  else
+    puts "Error: Too many arguments"
+    exit 1
+  end
+
+  # Expand path
+  mount_path = File.expand_path(mount_path)
+
+  # Connect to RPC server and send command
+  begin
+    client = AgentFS::RPCClient.new(AgentFS::SOCKET_PATH.to_s)
+
+    params = {"path" => mount_path}
+    params["repo"] = repo_name if repo_name
+
+    result = client.call("fs.open", params)
+
+    if result["success"]?.try(&.as_bool?)
+      puts "✅ Mounted #{repo_name || "default"} at #{mount_path}"
+    else
+      error = result["error"]?.try(&.as_s?) || "Unknown error"
+      puts "❌ Error: #{error}"
+      exit 1
+    end
+  rescue ex : Exception
+    puts "❌ Failed to connect to agent: #{ex.message}"
+    puts ""
+    puts "Is the agent running? Try: gentility run"
+    exit 1
+  end
 end
 
 def handle_fs_close(args : Array(String))
-  # TODO: Implement via RPC client
-  puts "fs close - not yet implemented"
-  exit 1
+  if args.empty?
+    puts "Usage: gentility close <path>"
+    puts ""
+    puts "Example:"
+    puts "  gentility close ~/Documents/notes"
+    exit 1
+  end
+
+  mount_path = File.expand_path(args[0])
+
+  begin
+    client = AgentFS::RPCClient.new(AgentFS::SOCKET_PATH.to_s)
+    result = client.call("fs.close", {"path" => mount_path})
+
+    if result["success"]?.try(&.as_bool?)
+      puts "✅ Unmounted #{mount_path}"
+    else
+      error = result["error"]?.try(&.as_s?) || "Unknown error"
+      puts "❌ Error: #{error}"
+      exit 1
+    end
+  rescue ex : Exception
+    puts "❌ Failed to connect to agent: #{ex.message}"
+    puts ""
+    puts "Is the agent running? Try: gentility run"
+    exit 1
+  end
 end
 
 def handle_fs_list(args : Array(String))
-  # TODO: Implement via RPC client
-  puts "fs list - not yet implemented"
-  exit 1
+  begin
+    client = AgentFS::RPCClient.new(AgentFS::SOCKET_PATH.to_s)
+    result = client.call("fs.list", {} of String => String)
+
+    if repos = result["repos"]?.try(&.as_a?)
+      if repos.empty?
+        puts "No repositories configured"
+      else
+        puts "Repositories:"
+        repos.each do |repo|
+          name = repo["name"]?.try(&.as_s?) || "unknown"
+          path = repo["path"]?.try(&.as_s?) || "unknown"
+          puts "  #{name} (#{path})"
+        end
+      end
+    else
+      error = result["error"]?.try(&.as_s?) || "Unknown error"
+      puts "❌ Error: #{error}"
+      exit 1
+    end
+  rescue ex : Exception
+    puts "❌ Failed to connect to agent: #{ex.message}"
+    puts ""
+    puts "Is the agent running? Try: gentility run"
+    exit 1
+  end
 end
 
 def handle_fs_status(args : Array(String))
-  # TODO: Implement via RPC client
-  puts "fs status - not yet implemented"
-  exit 1
+  begin
+    client = AgentFS::RPCClient.new(AgentFS::SOCKET_PATH.to_s)
+    result = client.call("fs.status", {} of String => String)
+
+    if mounts = result["mounts"]?.try(&.as_a?)
+      if mounts.empty?
+        puts "No active mounts"
+      else
+        puts "Active Mounts:"
+        mounts.each do |mount|
+          repo = mount["repo"]?.try(&.as_s?) || "unknown"
+          path = mount["path"]?.try(&.as_s?) || "unknown"
+          files = mount["file_count"]?.try(&.as_i?) || 0
+          puts "  #{repo} → #{path} (#{files} files)"
+        end
+      end
+    else
+      error = result["error"]?.try(&.as_s?) || "Unknown error"
+      puts "❌ Error: #{error}"
+      exit 1
+    end
+  rescue ex : Exception
+    puts "❌ Failed to connect to agent: #{ex.message}"
+    puts ""
+    puts "Is the agent running? Try: gentility run"
+    exit 1
+  end
 end
