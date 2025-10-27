@@ -1,7 +1,7 @@
 require "json"
 require "./storage"
 
-module JJFS
+module AgentFS
   class RPCServer
     def initialize(@storage : Storage, @sync_coordinator : SyncCoordinator? = nil)
     end
