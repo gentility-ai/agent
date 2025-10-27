@@ -2,7 +2,7 @@ require "./storage"
 require "./watcher"
 require "log"
 
-module JJFS
+module AgentFS
   class SyncCoordinator
     Log = ::Log.for(self)
 
