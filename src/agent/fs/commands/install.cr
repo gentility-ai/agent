@@ -1,6 +1,6 @@
 require "file_utils"
 
-module JJFS::Commands
+module AgentFS::Commands
   class Install
     def execute
       jjfsd_path = find_jjfsd

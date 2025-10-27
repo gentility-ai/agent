@@ -1,7 +1,7 @@
 require "../storage"
 require "file_utils"
 
-module JJFS::Commands
+module AgentFS::Commands
   class New
     def initialize(@storage : Storage, @repo_name : String)
     end

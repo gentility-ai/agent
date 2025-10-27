@@ -1,4 +1,4 @@
-module JJFS::Commands
+module AgentFS::Commands
   class Stop
     def execute
       {% if flag?(:darwin) %}

@@ -1,7 +1,7 @@
 require "../rpc_client"
 require "../storage"
 
-module JJFS::Commands
+module AgentFS::Commands
   class Status
     def initialize(@storage : Storage)
     end

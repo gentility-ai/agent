@@ -2,7 +2,7 @@ require "../storage"
 require "file_utils"
 require "uri"
 
-module JJFS::Commands
+module AgentFS::Commands
   class Import
     def initialize(@storage : Storage, @git_url : String, @repo_name : String?)
     end

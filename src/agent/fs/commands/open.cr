@@ -1,7 +1,7 @@
 require "../mount_manager"
 require "../storage"
 
-module JJFS::Commands
+module AgentFS::Commands
   class Open
     def initialize(@storage : Storage, @repo_name : String, @path : String?)
     end

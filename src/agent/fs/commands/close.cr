@@ -1,6 +1,6 @@
 require "../mount_manager"
 
-module JJFS::Commands
+module AgentFS::Commands
   class Close
     def initialize(@storage : Storage, @path : String)
     end

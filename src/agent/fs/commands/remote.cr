@@ -1,6 +1,6 @@
 require "../storage"
 
-module JJFS::Commands
+module AgentFS::Commands
   class Remote
     def initialize(@storage : Storage, @args : Array(String))
     end
