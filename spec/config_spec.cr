@@ -146,7 +146,7 @@ describe "GentilityAgent" do
       signing_key = Ed25519::SigningKey.new
       access_key = Base58.encode(signing_key.key_bytes)
 
-      agent = GentilityAgent.new(access_key, "ws://localhost:9000", "test-agent", "test", false)
+      agent = GentilityAgent.new(access_key, "ws://localhost:9000", "test-agent", "test")
       agent.should_not be_nil
     end
   end

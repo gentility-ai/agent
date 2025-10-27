@@ -696,7 +696,7 @@ describe "WebSocket Commands" do
         # Create new agent with same key
         ENV["GENTILITY_CONFIG"] = config_file
         signing_key2 = AgentCrypto.parse_private_key(access_key)
-        agent2 = GentilityAgent.new(access_key, "ws://localhost:9000", "test-agent", "test", false)
+        agent2 = GentilityAgent.new(access_key, "ws://localhost:9000", "test-agent", "test")
 
         # Should be able to load credentials with new agent instance
         loaded = AgentCrypto.load_credentials(config_file, db_id, signing_key2)

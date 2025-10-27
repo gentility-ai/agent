@@ -79,7 +79,7 @@ module TestHelpers
     File.write(config_file, config_content)
     ENV["GENTILITY_CONFIG"] = config_file
 
-    agent = GentilityAgent.new(access_key, "ws://localhost:9000", "test-agent", "test", false)
+    agent = GentilityAgent.new(access_key, "ws://localhost:9000", "test-agent", "test")
     {agent, config_file, signing_key}
   end
 
