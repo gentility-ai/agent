@@ -1,6 +1,6 @@
 require "process"
 
-module JJFS
+module AgentFS
   class Watcher
     @running = false
     @process : Process?
