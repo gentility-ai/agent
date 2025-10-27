@@ -1,7 +1,7 @@
 require "socket"
 require "json"
 
-module JJFS
+module AgentFS
   class RPCClient
     def initialize(@socket_path : String)
     end
