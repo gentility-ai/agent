@@ -1,6 +1,20 @@
 require "json"
 
-module JJFS
+module AgentFS
+  # Base directory for filesystem management
+  BASE_DIR = if Process.uid == 0
+    Path.new("/var/lib/gentility/fs")
+  else
+    Path.home / ".config" / "gentility" / "fs"
+  end
+
+  # Unix socket path for agent communication
+  SOCKET_PATH = if Process.uid == 0
+    Path.new("/run/gentility/agent.sock")
+  else
+    Path.home / ".config" / "gentility" / "agent.sock"
+  end
+
   class RepoConfig
     include JSON::Serializable
 
