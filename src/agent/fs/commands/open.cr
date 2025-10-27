@@ -3,20 +3,29 @@ require "../storage"
 
 module AgentFS::Commands
   class Open
-    def initialize(@storage : Storage, @repo_name : String, @path : String?)
+    def initialize(@storage : Storage, @repo_name : String?, @path : String?)
     end
 
     def execute
+      # If no repo specified, get default from server
+      repo_name = @repo_name
+      if repo_name.nil?
+        repo_name = get_default_repo_name
+      end
+
+      # Ensure repo exists locally
+      ensure_repo_exists(repo_name)
+
       # Default path: ./<repo_name>
-      mount_path = @path || File.join(Dir.current, @repo_name)
+      mount_path = @path || File.join(Dir.current, repo_name)
 
       # Check if we're in a git repo and offer to add to .gitignore
       check_and_offer_gitignore(mount_path)
 
       manager = MountManager.new(@storage)
 
-      if mount = manager.mount(@repo_name, mount_path)
-        puts "Opened #{@repo_name} at #{mount.path}"
+      if mount = manager.mount(repo_name, mount_path)
+        puts "Opened #{repo_name} at #{mount.path}"
         true
       else
         false
@@ -81,6 +90,29 @@ module AgentFS::Commands
       else
         File.write(gitignore_path, "/#{mount_name}\n")
       end
+    end
+
+    private def get_default_repo_name : String
+      # Query agent's websocket connection for default share
+      # This will be implemented via agent's WebSocket query
+      # For now, return hardcoded default
+      "default/shared"
+    end
+
+    private def ensure_repo_exists(repo_name : String)
+      repo_path = Config::BASE_DIR / "repos" / repo_name
+
+      unless Dir.exists?(repo_path)
+        # Repo doesn't exist - need to import from server
+        import_default_repo(repo_name)
+      end
+    end
+
+    private def import_default_repo(repo_name : String)
+      # Query server for git URL
+      # Clone using jj git clone
+      # This requires server integration - stub for now
+      raise "Repository #{repo_name} not found locally and server import not yet implemented"
     end
   end
 end
