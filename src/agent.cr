@@ -996,6 +996,14 @@ class GentilityAgent
           "error"   => ex.message || "Decryption failed",
         }
       end
+    when "get_default_share"
+      # Return configured default share info
+      # For now, return a placeholder - server will need to provide this
+      {
+        "org_slug" => "default",
+        "git_url"  => "", # Server should provide this
+        "name"     => "shared",
+      }
     else
       {"error" => "Unknown command: #{command}"}
     end
@@ -1061,6 +1069,7 @@ class GentilityAgent
       "security_set",
       "security_unset",
       "get_status",
+      "get_default_share",
     ]
   end
 
