@@ -423,6 +423,9 @@ class GentilityAgent
       # Start Unix socket RPC server for fs commands
       start_rpc_server
 
+      # Initialize filesystem mounts
+      initialize_fs
+
       # Send initial status
       send_status
     else
@@ -1312,6 +1315,21 @@ class GentilityAgent
     client.puts(response)
   ensure
     client.close
+  end
+
+  private def initialize_fs
+    # Ensure base directories exist
+    base_dir = AgentFS::BASE_DIR
+    Dir.mkdir_p(base_dir / "repos")
+
+    # Load storage and start sync coordinator for existing mounts
+    storage = AgentFS::Storage.new(base_dir.to_s)
+    sync_coordinator = AgentFS::SyncCoordinator.new(storage)
+    sync_coordinator.start
+
+    puts "Filesystem mount manager initialized"
+  rescue ex : Exception
+    puts "Warning: Failed to initialize filesystem mounts: #{ex.message}"
   end
 end
 
