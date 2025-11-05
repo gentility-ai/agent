@@ -33,6 +33,7 @@ require "base58"
 require "crypto/subtle"
 require "openssl"
 require "base64"
+require "socket"
 
 # Agent modules
 require "./agent/oauth"
@@ -42,6 +43,7 @@ require "./agent/crypto"
 require "./agent/config"
 require "./agent/database"
 require "./agent/cli"
+require "./agent/fs"
 
 # Read version from VERSION file at compile time
 VERSION = {{ read_file("VERSION").strip }}
@@ -61,6 +63,7 @@ class GentilityAgent
   @x25519_private_key : Bytes?
   @x25519_public_key : Bytes?
   @x25519_shared_secret : Bytes?
+  @rpc_server : UNIXServer?
 
   def initialize(access_key : String, @server_url : String, @nickname : String, @environment : String = "prod")
     # Determine if this is a machine_key or oauth_token based on prefix
@@ -333,6 +336,9 @@ class GentilityAgent
 
     # Close WebSocket
     @websocket.try(&.close)
+
+    # Stop RPC server
+    @rpc_server.try(&.close)
   end
 
   def reload_security_config
@@ -413,6 +419,12 @@ class GentilityAgent
 
       # Start ping mechanism
       start_ping_loop
+
+      # Start Unix socket RPC server for fs commands
+      start_rpc_server
+
+      # Initialize filesystem mounts
+      initialize_fs
 
       # Send initial status
       send_status
@@ -987,6 +999,14 @@ class GentilityAgent
           "error"   => ex.message || "Decryption failed",
         }
       end
+    when "get_default_share"
+      # Return configured default share info
+      # For now, return a placeholder - server will need to provide this
+      {
+        "org_slug" => "default",
+        "git_url"  => "", # Server should provide this
+        "name"     => "shared",
+      }
     else
       {"error" => "Unknown command: #{command}"}
     end
@@ -1052,6 +1072,7 @@ class GentilityAgent
       "security_set",
       "security_unset",
       "get_status",
+      "get_default_share",
     ]
   end
 
@@ -1248,6 +1269,67 @@ class GentilityAgent
       puts "Error sending message: #{ex.message}"
       debug_log("→ Send error: #{ex.message}")
     end
+  end
+
+  private def start_rpc_server
+    socket_path = AgentFS::SOCKET_PATH
+
+    # Clean up stale socket
+    File.delete(socket_path) if File.exists?(socket_path)
+
+    # Ensure parent directory exists
+    Dir.mkdir_p(socket_path.parent)
+
+    # Create Unix socket server
+    @rpc_server = UNIXServer.new(socket_path.to_s)
+
+    # Spawn fiber to handle RPC requests
+    spawn do
+      # Create storage and RPC handler
+      storage = AgentFS::Storage.new(AgentFS::BASE_DIR.to_s)
+      rpc_handler = AgentFS::RPCServer.new(storage)
+
+      while @running
+        if server = @rpc_server
+          if client = server.accept?
+            spawn handle_rpc_client(client, rpc_handler)
+          end
+        else
+          break
+        end
+      end
+    rescue ex : Exception
+      puts "RPC server error: #{ex.message}" unless @graceful_shutdown
+    end
+
+    puts "RPC server listening on #{socket_path}"
+  rescue ex : Exception
+    puts "Failed to start RPC server: #{ex.message}"
+  end
+
+  private def handle_rpc_client(client : UNIXSocket, rpc : AgentFS::RPCServer)
+    request = client.gets
+    return unless request
+
+    response = rpc.handle(request)
+    client.puts(response)
+  ensure
+    client.close
+  end
+
+  private def initialize_fs
+    # Ensure base directories exist
+    base_dir = AgentFS::BASE_DIR
+    Dir.mkdir_p(base_dir / "repos")
+
+    # Load storage and start sync coordinator for existing mounts
+    storage = AgentFS::Storage.new(base_dir.to_s)
+    sync_coordinator = AgentFS::SyncCoordinator.new(storage)
+    sync_coordinator.start
+
+    puts "Filesystem mount manager initialized"
+  rescue ex : Exception
+    puts "Warning: Failed to initialize filesystem mounts: #{ex.message}"
   end
 end
 
