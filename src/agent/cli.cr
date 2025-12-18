@@ -6,6 +6,7 @@ require "http/web_socket"
 require "openssl"
 require "./config"
 require "./crypto"
+require "./database"
 require "./oauth"
 
 # CLI functions for the Gentility Agent
@@ -1094,6 +1095,320 @@ def generate_keypair
   puts ""
 end
 
+# Read password without echo
+def read_password(prompt : String = "Password: ") : String
+  print prompt
+  STDOUT.flush
+
+  # Try to disable echo
+  result = `stty -echo 2>/dev/null`
+  echo_disabled = $?.success?
+
+  begin
+    password = gets.try(&.strip) || ""
+    puts "" # New line after password input
+    password
+  ensure
+    `stty echo 2>/dev/null` if echo_disabled
+  end
+end
+
+# Get signing key from machine_key for credential encryption
+def get_signing_key_for_credentials : Ed25519::SigningKey?
+  config_file = AgentConfig.get_config_path
+  return nil unless File.exists?(config_file)
+
+  config = YAML.parse(File.read(config_file))
+  config_hash = config.as_h? || {} of YAML::Any => YAML::Any
+
+  machine_key = config_hash[YAML::Any.new("machine_key")]?.try(&.as_s)
+  return nil unless machine_key
+
+  # Parse machine key: genkey-agent-{base58_key}-{checksum}
+  parts = machine_key.split("-")
+  return nil unless parts.size >= 3 && parts[0] == "genkey" && parts[1] == "agent"
+
+  # Extract key part (skip prefix and checksum suffix)
+  key_part = parts[2..-2].join("-")
+  return nil if key_part.empty?
+
+  # Decode base58 - includes version byte
+  decoded = Base58.decode(key_part).to_slice
+  return nil unless decoded.size == 33 # 1 version byte + 32 key bytes
+
+  # Skip version byte
+  key_bytes = decoded[1..-1]
+  Ed25519::SigningKey.new(key_bytes)
+rescue
+  nil
+end
+
+# Handle credentials command
+def handle_credentials_command(args : Array(String))
+  if args.empty?
+    puts "Usage: gentility credentials <add|test|list|remove> [options]"
+    puts ""
+    puts "Commands:"
+    puts "  add <name> [--url <connection-url>]  Add database credentials"
+    puts "  test <name>                          Test database connection"
+    puts "  list                                 List stored credentials"
+    puts "  remove <name>                        Remove stored credentials"
+    puts ""
+    puts "Examples:"
+    puts "  gentility credentials add prod-db --url postgres://user:pass@host:5432/db"
+    puts "  gentility credentials add prod-db    # Interactive mode"
+    puts "  gentility credentials test prod-db"
+    puts "  gentility credentials list"
+    puts "  gentility credentials remove prod-db"
+    return
+  end
+
+  case args[0]
+  when "add"
+    handle_credentials_add(args[1..-1])
+  when "test"
+    handle_credentials_test(args[1..-1])
+  when "list"
+    handle_credentials_list
+  when "remove"
+    handle_credentials_remove(args[1..-1])
+  else
+    puts "Unknown credentials command: #{args[0]}"
+    puts "Use: gentility credentials <add|test|list|remove>"
+  end
+end
+
+def handle_credentials_add(args : Array(String))
+  if args.empty?
+    puts "Usage: gentility credentials add <name> [--url <connection-url>]"
+    return
+  end
+
+  name = args[0]
+  url : String? = nil
+
+  # Parse --url option
+  i = 1
+  while i < args.size
+    if args[i] == "--url" && i + 1 < args.size
+      url = args[i + 1]
+      i += 2
+    else
+      i += 1
+    end
+  end
+
+  config_file = AgentConfig.get_config_path
+
+  # Check if name already exists
+  existing = AgentCrypto.load_credential_meta(config_file, name)
+  if existing
+    puts "❌ Credential '#{name}' already exists"
+    puts "Use 'gentility credentials remove #{name}' first to replace it"
+    return
+  end
+
+  # Get signing key
+  signing_key = get_signing_key_for_credentials
+  unless signing_key
+    puts "❌ No machine key found. Run 'gentility auth' first."
+    return
+  end
+
+  # Parse URL or prompt interactively
+  parsed : ParsedConnectionURL? = nil
+  username : String? = nil
+  password : String? = nil
+
+  if url
+    begin
+      parsed = ParsedConnectionURL.parse(url)
+      username = parsed.username
+      password = parsed.password
+    rescue ex
+      puts "❌ Invalid connection URL: #{ex.message}"
+      return
+    end
+  else
+    # Interactive mode
+    puts "Adding new credential: #{name}"
+    puts ""
+
+    print "Database type (postgres/mysql) [postgres]: "
+    type_input = gets.try(&.strip) || ""
+    db_type = type_input.empty? ? "postgres" : type_input
+    unless ["postgres", "mysql"].includes?(db_type)
+      puts "❌ Invalid database type. Use 'postgres' or 'mysql'"
+      return
+    end
+
+    print "Host: "
+    host = gets.try(&.strip) || ""
+    if host.empty?
+      puts "❌ Host is required"
+      return
+    end
+
+    default_port = db_type == "postgres" ? 5432 : 3306
+    print "Port [#{default_port}]: "
+    port_input = gets.try(&.strip) || ""
+    port = port_input.empty? ? default_port : port_input.to_i
+
+    print "Database: "
+    database = gets.try(&.strip) || ""
+    if database.empty?
+      puts "❌ Database name is required"
+      return
+    end
+
+    print "Username: "
+    username = gets.try(&.strip)
+
+    password = read_password("Password: ")
+
+    parsed = ParsedConnectionURL.new(db_type, host, port, database, username, password)
+  end
+
+  unless parsed
+    puts "❌ Failed to parse connection details"
+    return
+  end
+
+  # Generate UUID and create metadata
+  uuid = AgentCrypto.generate_uuid
+  meta = CredentialMeta.new(name, uuid, parsed.type, parsed.host, parsed.port, parsed.database)
+
+  # Store credential
+  AgentCrypto.store_credential_with_meta(
+    config_file,
+    meta,
+    username || "",
+    password || "",
+    signing_key
+  )
+
+  puts ""
+  puts "✅ Credential '#{name}' added successfully"
+  puts "   Type: #{parsed.type}"
+  puts "   Host: #{parsed.host}:#{parsed.port}"
+  puts "   Database: #{parsed.database}"
+  puts ""
+  puts "Test with: gentility credentials test #{name}"
+
+  # Note: On master, we don't have RPC to notify the running agent
+  # Credentials will be advertised on next agent connect/reconnect
+end
+
+def handle_credentials_test(args : Array(String))
+  if args.empty?
+    puts "Usage: gentility credentials test <name>"
+    return
+  end
+
+  name = args[0]
+  config_file = AgentConfig.get_config_path
+
+  # Load metadata
+  meta = AgentCrypto.load_credential_meta(config_file, name)
+  unless meta
+    puts "❌ Credential '#{name}' not found"
+    return
+  end
+
+  # Get signing key
+  signing_key = get_signing_key_for_credentials
+  unless signing_key
+    puts "❌ No machine key found"
+    return
+  end
+
+  # Load secrets
+  secrets = AgentCrypto.load_credential_secrets(config_file, meta.uuid, signing_key)
+  unless secrets
+    puts "❌ Failed to decrypt credentials"
+    return
+  end
+
+  puts "Testing connection to #{meta.type}://#{meta.host}:#{meta.port}/#{meta.database}..."
+
+  # Use existing AgentDatabase module for connection test
+  result = case meta.type
+           when "postgres"
+             AgentDatabase.execute_psql_query(
+               meta.host,
+               meta.port,
+               meta.database,
+               "SELECT 1 as test",
+               secrets["username"].as_s,
+               secrets["password"].as_s
+             )
+           when "mysql"
+             AgentDatabase.execute_mysql_query(
+               meta.host,
+               meta.port,
+               meta.database,
+               "SELECT 1 as test"
+             )
+           else
+             {"success" => false, "error" => "Unknown database type: #{meta.type}"}
+           end
+
+  if result["success"] == true
+    puts "✅ Connection successful!"
+  else
+    puts "❌ Connection failed: #{result["error"]?}"
+  end
+end
+
+def handle_credentials_list
+  config_file = AgentConfig.get_config_path
+  credentials = AgentCrypto.list_credentials_meta(config_file)
+
+  if credentials.empty?
+    puts "No credentials stored"
+    puts ""
+    puts "Add credentials with: gentility credentials add <name>"
+    return
+  end
+
+  puts "Stored credentials:"
+  puts ""
+
+  credentials.each do |cred|
+    puts "  #{cred.name}"
+    puts "    Type: #{cred.type}"
+    puts "    Host: #{cred.host}:#{cred.port}"
+    puts "    Database: #{cred.database}"
+    puts ""
+  end
+end
+
+def handle_credentials_remove(args : Array(String))
+  if args.empty?
+    puts "Usage: gentility credentials remove <name>"
+    return
+  end
+
+  name = args[0]
+  config_file = AgentConfig.get_config_path
+
+  # Check if exists
+  meta = AgentCrypto.load_credential_meta(config_file, name)
+  unless meta
+    puts "❌ Credential '#{name}' not found"
+    return
+  end
+
+  # Remove it
+  if AgentCrypto.remove_credential(config_file, name)
+    puts "✅ Credential '#{name}' removed"
+    # Note: On master, we don't have RPC to notify the running agent
+    # Credentials will be advertised on next agent connect/reconnect
+  else
+    puts "❌ Failed to remove credential '#{name}'"
+  end
+end
+
 def show_help
   puts "Gentility AI Agent v#{VERSION}"
   puts "==================#{("=" * VERSION.size)}"
@@ -1105,6 +1420,7 @@ def show_help
   puts "    auth                 Authenticate and provision machine key (required first step)"
   puts "    run, start           Start the agent daemon"
   puts "    status               Show agent configuration and service status"
+  puts "    credentials          Manage local database credentials"
   puts "    generate             Generate a new Ed25519 keypair (advanced)"
   puts "    setup <token>        Initial setup with machine key (advanced)"
   puts "    security <mode>      Configure security settings"
@@ -1132,6 +1448,12 @@ def show_help
   puts "    password [pass]      Enable password authentication"
   puts "    none                 Disable security"
   puts "    clear-lockout        Clear rate limiting lockout state"
+  puts ""
+  puts "CREDENTIALS COMMANDS:"
+  puts "    add <name> [--url <url>]  Add database credentials (URL or interactive)"
+  puts "    test <name>               Test database connection"
+  puts "    list                      List stored credentials"
+  puts "    remove <name>             Remove stored credentials"
   puts ""
   puts "PROMISCUOUS ACTIONS:"
   puts "    enable               Enable promiscuous mode"
@@ -1161,6 +1483,13 @@ def show_help
   puts "    # Check status"
   puts "    gentility status"
   puts "    gentility version"
+  puts "    "
+  puts "    # Manage local database credentials"
+  puts "    gentility credentials add prod-db --url postgres://user:pass@host:5432/db"
+  puts "    gentility credentials add prod-db              # Interactive mode"
+  puts "    gentility credentials test prod-db"
+  puts "    gentility credentials list"
+  puts "    gentility credentials remove prod-db"
   puts "    "
   puts "    # Advanced: Manual keypair setup"
   puts "    gentility generate"
@@ -1375,10 +1704,13 @@ def main
         puts "Usage: #{PROGRAM_NAME} promiscuous <enable|disable|status|auth>"
         exit 1
       end
+    when "credentials"
+      handle_credentials_command(ARGV[1..-1])
+      exit 0
     else
       puts "Unknown command: #{ARGV[0]}"
       puts ""
-      puts "Available commands: run, start, status, setup, security, test-totp, promiscuous, version, help"
+      puts "Available commands: run, start, status, setup, security, credentials, test-totp, promiscuous, version, help"
       puts "For detailed help: gentility help or gentility -h"
       exit 1
     end

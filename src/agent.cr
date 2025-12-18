@@ -477,6 +477,9 @@ class GentilityAgent
           puts "Warning: Server sent X25519 public key but agent has no X25519 private key" if CLI.debug_mode
         end
       end
+
+      # Advertise available credentials to server
+      advertise_credentials
     when "error"
       # Handle error messages from server
       error_code = msg["error"]?.try(&.to_s)
@@ -1248,6 +1251,33 @@ class GentilityAgent
       puts "Error sending message: #{ex.message}"
       debug_log("→ Send error: #{ex.message}")
     end
+  end
+
+  # Advertise available credentials to the server
+  private def advertise_credentials
+    config_file = AgentConfig.get_config_path
+    credentials = AgentCrypto.list_credentials_meta(config_file)
+
+    # Build credential list for advertisement (no sensitive data)
+    credential_list = credentials.map do |cred|
+      cred.to_advertisement
+    end
+
+    if credentials.empty?
+      puts "No credentials stored"
+      puts ""
+      puts "Add credentials with: gentility credentials add <name>"
+    else
+      puts "Advertising #{credentials.size} credential(s) to server"
+    end
+
+    send_message({
+      "type"        => "credentials_available",
+      "credentials" => credential_list,
+    })
+  rescue ex : Exception
+    puts "Warning: Failed to advertise credentials: #{ex.message}"
+    debug_log("Error advertising credentials: #{ex.message}")
   end
 end
 

@@ -4,6 +4,71 @@ require "base64"
 require "json"
 require "yaml"
 require "ed25519"
+require "uuid"
+require "uri"
+
+# Credential metadata for local storage
+struct CredentialMeta
+  include JSON::Serializable
+
+  property name : String
+  property uuid : String
+  property type : String  # "postgres" or "mysql"
+  property host : String
+  property port : Int32
+  property database : String
+
+  def initialize(@name, @uuid, @type, @host, @port, @database)
+  end
+
+  # For server advertisement (no sensitive data)
+  def to_advertisement
+    {"name" => name, "uuid" => uuid, "type" => type, "host" => host}
+  end
+end
+
+# Parsed connection URL result
+struct ParsedConnectionURL
+  property type : String      # "postgres" or "mysql"
+  property host : String
+  property port : Int32
+  property database : String
+  property username : String?
+  property password : String?
+
+  def initialize(@type, @host, @port, @database, @username, @password)
+  end
+
+  # Parse a database connection URL
+  # Supports: postgres://user:pass@host:port/database
+  #           mysql://user:pass@host:port/database
+  #           postgresql://... (alias for postgres)
+  def self.parse(url : String) : ParsedConnectionURL
+    uri = URI.parse(url)
+
+    # Determine type from scheme
+    type = case uri.scheme
+           when "postgres", "postgresql" then "postgres"
+           when "mysql", "mariadb"       then "mysql"
+           else
+             raise "Unsupported database type: #{uri.scheme}. Use postgres:// or mysql://"
+           end
+
+    # Default ports
+    default_port = type == "postgres" ? 5432 : 3306
+
+    host = uri.host || raise "Missing host in connection URL"
+    port = uri.port || default_port
+    database = uri.path.try(&.lstrip('/')) || ""
+    raise "Missing database name in connection URL" if database.empty?
+
+    # URL decode username/password
+    username = uri.user.try { |u| URI.decode(u) }
+    password = uri.password.try { |p| URI.decode(p) }
+
+    ParsedConnectionURL.new(type, host, port, database, username, password)
+  end
+end
 
 # Cryptographic utilities for Ed25519 keypairs and credential encryption
 module AgentCrypto
@@ -186,5 +251,173 @@ module AgentCrypto
     decrypted.write(cipher.final)
 
     String.new(decrypted.to_slice)
+  end
+
+  # Generate a new UUID for credential identification
+  def self.generate_uuid : String
+    UUID.random.to_s
+  end
+
+  # Store credential with metadata (friendly name mapping)
+  # Stores metadata in db_credentials_meta and encrypted secrets in encrypted_db_credentials
+  def self.store_credential_with_meta(config_file : String, meta : CredentialMeta, username : String, password : String, signing_key : Ed25519::SigningKey)
+    # Load config
+    config = if File.exists?(config_file)
+               YAML.parse(File.read(config_file))
+             else
+               YAML.parse("{}")
+             end
+
+    config_hash = config.as_h? || {} of YAML::Any => YAML::Any
+
+    # Get or create db_credentials_meta section
+    meta_section = if existing = config_hash[YAML::Any.new("db_credentials_meta")]?
+                     existing.as_h? || {} of YAML::Any => YAML::Any
+                   else
+                     {} of YAML::Any => YAML::Any
+                   end
+
+    # Store metadata by friendly name
+    meta_hash = {
+      YAML::Any.new("uuid")     => YAML::Any.new(meta.uuid),
+      YAML::Any.new("type")     => YAML::Any.new(meta.type),
+      YAML::Any.new("host")     => YAML::Any.new(meta.host),
+      YAML::Any.new("port")     => YAML::Any.new(meta.port.to_i64),
+      YAML::Any.new("database") => YAML::Any.new(meta.database),
+    }
+    meta_section[YAML::Any.new(meta.name)] = YAML::Any.new(meta_hash)
+    config_hash[YAML::Any.new("db_credentials_meta")] = YAML::Any.new(meta_section)
+
+    # Store encrypted credentials (includes all connection details for query execution)
+    secrets = {
+      "username" => username,
+      "password" => password,
+      "host"     => meta.host,
+      "port"     => meta.port,
+      "database" => meta.database,
+      "type"     => meta.type,
+    }.to_json
+    encrypted = encrypt(signing_key, secrets)
+
+    # Get or create encrypted_db_credentials section
+    creds_section = if existing = config_hash[YAML::Any.new("encrypted_db_credentials")]?
+                      existing.as_h? || {} of YAML::Any => YAML::Any
+                    else
+                      {} of YAML::Any => YAML::Any
+                    end
+
+    creds_section[YAML::Any.new(meta.uuid)] = YAML::Any.new(encrypted)
+    config_hash[YAML::Any.new("encrypted_db_credentials")] = YAML::Any.new(creds_section)
+
+    # Write back to file
+    File.write(config_file, config_hash.to_yaml)
+    File.chmod(config_file, 0o640)
+  end
+
+  # Load credential metadata by friendly name
+  def self.load_credential_meta(config_file : String, name : String) : CredentialMeta?
+    return nil unless File.exists?(config_file)
+
+    config = YAML.parse(File.read(config_file))
+    config_hash = config.as_h? || {} of YAML::Any => YAML::Any
+
+    meta_section = config_hash[YAML::Any.new("db_credentials_meta")]?
+    return nil unless meta_section
+
+    meta_hash = meta_section.as_h? || {} of YAML::Any => YAML::Any
+    meta_entry = meta_hash[YAML::Any.new(name)]?
+    return nil unless meta_entry
+
+    entry = meta_entry.as_h?
+    return nil unless entry
+
+    uuid = entry[YAML::Any.new("uuid")]?.try(&.as_s)
+    type = entry[YAML::Any.new("type")]?.try(&.as_s)
+    host = entry[YAML::Any.new("host")]?.try(&.as_s)
+    port = entry[YAML::Any.new("port")]?.try(&.as_i)
+    database = entry[YAML::Any.new("database")]?.try(&.as_s)
+
+    return nil unless uuid && type && host && port && database
+
+    CredentialMeta.new(name, uuid, type, host, port, database)
+  rescue
+    nil
+  end
+
+  # List all credential metadata
+  def self.list_credentials_meta(config_file : String) : Array(CredentialMeta)
+    result = [] of CredentialMeta
+    return result unless File.exists?(config_file)
+
+    config = YAML.parse(File.read(config_file))
+    config_hash = config.as_h? || {} of YAML::Any => YAML::Any
+
+    meta_section = config_hash[YAML::Any.new("db_credentials_meta")]?
+    return result unless meta_section
+
+    meta_hash = meta_section.as_h? || {} of YAML::Any => YAML::Any
+    meta_hash.each do |name_any, entry_any|
+      name = name_any.as_s? || next
+      entry = entry_any.as_h? || next
+
+      uuid = entry[YAML::Any.new("uuid")]?.try(&.as_s) || next
+      type = entry[YAML::Any.new("type")]?.try(&.as_s) || next
+      host = entry[YAML::Any.new("host")]?.try(&.as_s) || next
+      port = entry[YAML::Any.new("port")]?.try(&.as_i) || next
+      database = entry[YAML::Any.new("database")]?.try(&.as_s) || next
+
+      result << CredentialMeta.new(name, uuid, type, host, port, database)
+    end
+
+    result
+  rescue
+    [] of CredentialMeta
+  end
+
+  # Remove credential by friendly name
+  def self.remove_credential(config_file : String, name : String) : Bool
+    return false unless File.exists?(config_file)
+
+    # First get the UUID
+    meta = load_credential_meta(config_file, name)
+    return false unless meta
+
+    config = YAML.parse(File.read(config_file))
+    config_hash = config.as_h? || {} of YAML::Any => YAML::Any
+
+    # Remove from db_credentials_meta
+    if meta_section = config_hash[YAML::Any.new("db_credentials_meta")]?
+      if meta_hash = meta_section.as_h?
+        meta_hash = meta_hash.dup
+        meta_hash.delete(YAML::Any.new(name))
+        config_hash[YAML::Any.new("db_credentials_meta")] = YAML::Any.new(meta_hash)
+      end
+    end
+
+    # Remove from encrypted_db_credentials
+    if creds_section = config_hash[YAML::Any.new("encrypted_db_credentials")]?
+      if creds_hash = creds_section.as_h?
+        creds_hash = creds_hash.dup
+        creds_hash.delete(YAML::Any.new(meta.uuid))
+        config_hash[YAML::Any.new("encrypted_db_credentials")] = YAML::Any.new(creds_hash)
+      end
+    end
+
+    # Write back to file
+    File.write(config_file, config_hash.to_yaml)
+    File.chmod(config_file, 0o640)
+    true
+  rescue
+    false
+  end
+
+  # Load credential secrets (username, password, etc.) by UUID
+  def self.load_credential_secrets(config_file : String, uuid : String, signing_key : Ed25519::SigningKey) : JSON::Any?
+    encrypted = load_credentials(config_file, uuid, signing_key, silent: true)
+    return nil unless encrypted
+
+    JSON.parse(encrypted)
+  rescue
+    nil
   end
 end
