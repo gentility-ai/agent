@@ -332,14 +332,18 @@ release type="patch":
     echo "🚀 Publishing repository with version ${current_version}..."
     if aptly -config=configs/aptly.conf publish list | grep -q "stable"; then
         echo "Repository already published, updating..."
-        if ! aptly -config=configs/aptly.conf publish update -force-overwrite stable filesystem:local:debian; then
-            echo "🚨 Force update failed, dropping and republishing..."
-            aptly -config=configs/aptly.conf publish drop stable filesystem:local:debian
-            if [ -f .env ]; then
-                export $(cat .env | grep -v '^#' | xargs) && \
-                aptly -config=configs/aptly.conf publish repo -distribution=stable -gpg-key="${GPG_KEY_ID}" gentility-main filesystem:local:debian
-            else
-                aptly -config=configs/aptly.conf publish repo -distribution=stable -gpg-key=85C6BE5B453A071B gentility-main filesystem:local:debian
+        # Try normal update first (no force-overwrite warning)
+        if ! aptly -config=configs/aptly.conf publish update stable filesystem:local:debian 2>/dev/null; then
+            echo "⚠️  Normal update failed, trying with force-overwrite..."
+            if ! aptly -config=configs/aptly.conf publish update -force-overwrite stable filesystem:local:debian; then
+                echo "🚨 Force update failed, dropping and republishing..."
+                aptly -config=configs/aptly.conf publish drop stable filesystem:local:debian
+                if [ -f .env ]; then
+                    export $(cat .env | grep -v '^#' | xargs) && \
+                    aptly -config=configs/aptly.conf publish repo -distribution=stable -gpg-key="${GPG_KEY_ID}" gentility-main filesystem:local:debian
+                else
+                    aptly -config=configs/aptly.conf publish repo -distribution=stable -gpg-key=85C6BE5B453A071B gentility-main filesystem:local:debian
+                fi
             fi
         fi
     else
