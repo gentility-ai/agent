@@ -122,6 +122,13 @@ fi
 systemctl daemon-reload
 systemctl enable gentility
 
+# Check if service was running before upgrade and restart it
+if [ -f /var/lib/gentility-agent/.was-running ]; then
+    rm -f /var/lib/gentility-agent/.was-running
+    echo "Restarting service after upgrade..."
+    systemctl start gentility
+fi
+
 echo ""
 echo "Gentility AI Agent has been installed successfully!"
 echo ""
