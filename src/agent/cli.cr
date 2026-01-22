@@ -12,6 +12,10 @@ require "./oauth"
 # CLI functions for the Gentility Agent
 
 module CLI
+  # Service name for systemd (Linux) and launchd (macOS)
+  SYSTEMD_SERVICE = "gentility"
+  LAUNCHD_SERVICE = "com.gentility.agent"
+
   @@debug_mode = false
 
   def self.debug_mode
@@ -1045,7 +1049,7 @@ def show_status
   {% if flag?(:linux) %}
   puts "🔄 Service Status:"
   begin
-    result = `systemctl is-active gentility-agent 2>/dev/null`.strip
+    result = `systemctl is-active #{CLI::SYSTEMD_SERVICE} 2>/dev/null`.strip
     case result
     when "active"
       puts "   ✅ Running"
@@ -1057,7 +1061,7 @@ def show_status
       puts "   ❓ Unknown (#{result})"
     end
 
-    enabled = `systemctl is-enabled gentility-agent 2>/dev/null`.strip
+    enabled = `systemctl is-enabled #{CLI::SYSTEMD_SERVICE} 2>/dev/null`.strip
     puts "   Auto-start: #{enabled == "enabled" ? "✅ Enabled" : "❌ Disabled"}"
   rescue
     puts "   ❓ Unable to check service status"
@@ -1075,9 +1079,63 @@ def show_status
   puts ""
 
   puts "Commands:"
-  puts "   gentility run           Start agent"
-  puts "   sudo systemctl start gentility    Start service"
-  puts "   gentility help          Show help"
+  puts "   gentility run              Start agent in foreground"
+  puts "   gentility logs             View service logs"
+  puts "   gentility logs -f          Follow logs in real-time"
+  puts "   sudo systemctl start #{CLI::SYSTEMD_SERVICE}   Start service"
+  puts "   gentility help             Show help"
+end
+
+# Show service logs from journald
+def show_logs(follow : Bool = false, lines : Int32 = 100)
+  {% if flag?(:linux) %}
+    # Build journalctl command
+    cmd = "journalctl -u #{CLI::SYSTEMD_SERVICE} --no-pager"
+
+    if follow
+      cmd += " -f"
+      puts "Following logs for #{CLI::SYSTEMD_SERVICE} service (Ctrl+C to stop)..."
+      puts ""
+    else
+      cmd += " -n #{lines}"
+    end
+
+    # Execute journalctl and stream output
+    Process.run(cmd, shell: true, output: STDOUT, error: STDERR)
+  {% elsif flag?(:darwin) %}
+    # macOS uses different logging
+    log_file = "/opt/homebrew/var/log/gentility.log"
+    alt_log_file = "/usr/local/var/log/gentility.log"
+
+    actual_log = if File.exists?(log_file)
+      log_file
+    elsif File.exists?(alt_log_file)
+      alt_log_file
+    else
+      nil
+    end
+
+    if actual_log
+      if follow
+        puts "Following logs from #{actual_log} (Ctrl+C to stop)..."
+        puts ""
+        Process.run("tail", ["-f", actual_log], output: STDOUT, error: STDERR)
+      else
+        Process.run("tail", ["-n", lines.to_s, actual_log], output: STDOUT, error: STDERR)
+      end
+    else
+      puts "No log file found."
+      puts ""
+      puts "If running as a Homebrew service, check:"
+      puts "  #{log_file}"
+      puts ""
+      puts "Or view system logs with:"
+      puts "  log show --predicate 'process == \"gentility\"' --last 1h"
+    end
+  {% else %}
+    puts "Log viewing not supported on this platform."
+    puts "Try: journalctl -u gentility"
+  {% end %}
 end
 
 def show_version
@@ -1432,6 +1490,7 @@ def show_help
   puts "    auth                 Authenticate and provision machine key (required first step)"
   puts "    run, start           Start the agent daemon"
   puts "    status               Show agent configuration and service status"
+  puts "    logs [-f] [-n N]     View service logs (-f to follow, -n for line count)"
   puts "    credentials          Manage local database credentials"
   puts "    generate             Generate a new Ed25519 keypair (advanced)"
   puts "    setup <token>        Initial setup with machine key (advanced)"
@@ -1647,6 +1706,17 @@ def main
       ARGV.shift
     when "status"
       show_status
+      exit 0
+    when "logs"
+      # Parse logs options
+      follow = ARGV.includes?("-f") || ARGV.includes?("--follow")
+      lines = 100
+      ARGV.each_with_index do |arg, i|
+        if (arg == "-n" || arg == "--lines") && ARGV[i + 1]?
+          lines = ARGV[i + 1].to_i rescue 100
+        end
+      end
+      show_logs(follow, lines)
       exit 0
     when "security"
       if ARGV.size >= 2
