@@ -442,6 +442,14 @@ def is_ssh_session? : Bool
 end
 
 def run_oauth_flow(environment : String, headless : Bool, debug : Bool, org_id : String?, env_name : String?, nickname : String?)
+  # E2E testing bypass - check for test token before OAuth
+  if test_token = ENV["GENTILITY_TEST_TOKEN"]?
+    puts "🧪 Using test token from GENTILITY_TEST_TOKEN"
+    server_url = ENV["SERVER_URL"]? || AgentConfig::ServerURLs.websocket_url(environment)
+    provision_machine_key(test_token, server_url, environment, debug, org_id, env_name, nickname)
+    return
+  end
+
   # Auto-detect SSH/remote and use appropriate flow
   use_device_flow = is_ssh_session?
 
