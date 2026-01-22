@@ -605,7 +605,7 @@ class AgentProvisioner
         puts ""
         puts "💾 Saving machine key..."
 
-        save_machine_key(machine_key, org_id, environment, nickname)
+        save_machine_key(machine_key, org_id, environment, nickname, @server_url)
 
         @complete = true
         @websocket.try(&.close)
@@ -768,7 +768,7 @@ class AgentProvisioner
     selected["value"].not_nil!
   end
 
-  private def save_machine_key(machine_key : String, org_id : String?, environment : String?, nickname : String?)
+  private def save_machine_key(machine_key : String, org_id : String?, environment : String?, nickname : String?, server_url : String? = nil)
     config_file = AgentConfig.get_config_path
 
     # Check write permissions early before doing any work
@@ -807,6 +807,7 @@ class AgentProvisioner
     config_hash[YAML::Any.new("organization_id")] = YAML::Any.new(org_id) if org_id
     config_hash[YAML::Any.new("environment")] = YAML::Any.new(environment) if environment
     config_hash[YAML::Any.new("nickname")] = YAML::Any.new(nickname) if nickname
+    config_hash[YAML::Any.new("server_url")] = YAML::Any.new(server_url) if server_url
 
     # Write config
     File.write(config_file, config_hash.to_yaml)
