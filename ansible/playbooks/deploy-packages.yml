@@ -7,10 +7,10 @@
     
   tasks:
     - name: Check if local repository exists
-      local_action:
-        module: stat
+      ansible.builtin.stat:
         path: "{{ local_repo_path }}"
       register: local_repo_stat
+      delegate_to: localhost
       become: no
 
     - name: Fail if local repository not found
