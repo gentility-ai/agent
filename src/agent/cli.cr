@@ -987,10 +987,13 @@ def show_status
   puts ""
 
   config_file = AgentConfig.get_config_path
-  config = AgentConfig.load_config_from_file(config_file) || {} of String => String
+  config = AgentConfig.load_config_from_file(config_file)
 
-  # Check if configured
-  if config["GENTILITY_TOKEN"]?
+  # Check if config file exists and has auth credentials
+  has_machine_key = config && config["machine_key"]?
+  has_access_key = config && config["access_key"]?
+
+  if config && (has_machine_key || has_access_key)
     puts "✅ Configuration: Found"
     puts "   Config file: #{config_file}"
   else
@@ -1002,26 +1005,33 @@ def show_status
   end
 
   # Show basic config
-  if token = config["GENTILITY_TOKEN"]?
-    puts "   Token: #{token[0..12]}..."
+  if machine_key = config["machine_key"]?.try(&.as_s?)
+    puts "   Machine Key: #{machine_key[0..20]}..."
+  elsif access_key = config["access_key"]?.try(&.as_s?)
+    puts "   Access Key: #{access_key[0..12]}..."
   end
-  puts "   Server: #{config["SERVER_URL"]? || "ws://localhost:9000"}"
-  puts "   Nickname: #{config["NICKNAME"]? || `hostname`.strip}"
+
+  environment = config["environment"]?.try(&.as_s?) || "production"
+  server_url = AgentConfig::ServerURLs.websocket_url(environment)
+  nickname = config["nickname"]?.try(&.as_s?) || `hostname`.strip
+  puts "   Server: #{server_url}"
+  puts "   Nickname: #{nickname}"
+  puts "   Environment: #{environment}"
   puts ""
 
   # Security status
-  mode = config["SECURITY_MODE"]? || "none"
+  mode = config["security_mode"]?.try(&.as_s?) || "none"
   puts "🔐 Security Mode: #{mode}"
 
   case mode
   when "totp"
-    if config["SECURITY_TOTP_SECRET"]?
+    if config["security_totp_secret"]?
       puts "   TOTP Secret: Configured"
     else
       puts "   TOTP Secret: Missing"
     end
   when "password"
-    if config["SECURITY_PASSWORD"]?
+    if config["security_password_hash"]?
       puts "   Password: Configured"
     else
       puts "   Password: Missing"
@@ -1031,10 +1041,11 @@ def show_status
   end
   puts ""
 
-  # Service status
+  # Service status (Linux only)
+  {% if flag?(:linux) %}
   puts "🔄 Service Status:"
   begin
-    result = `systemctl is-active gentility 2>/dev/null`.strip
+    result = `systemctl is-active gentility-agent 2>/dev/null`.strip
     case result
     when "active"
       puts "   ✅ Running"
@@ -1046,16 +1057,17 @@ def show_status
       puts "   ❓ Unknown (#{result})"
     end
 
-    enabled = `systemctl is-enabled gentility 2>/dev/null`.strip
+    enabled = `systemctl is-enabled gentility-agent 2>/dev/null`.strip
     puts "   Auto-start: #{enabled == "enabled" ? "✅ Enabled" : "❌ Disabled"}"
   rescue
     puts "   ❓ Unable to check service status"
   end
   puts ""
+  {% end %}
 
   # Promiscuous mode
-  promiscuous_enabled = config["PROMISCUOUS_ENABLED"]? != "false"
-  promiscuous_auth_mode = config["PROMISCUOUS_AUTH_MODE"]? || "password"
+  promiscuous_enabled = config["promiscuous_enabled"]?.try(&.as_bool?) != false
+  promiscuous_auth_mode = config["promiscuous_auth_mode"]?.try(&.as_s?) || "password"
   puts "🔗 Promiscuous Mode: #{promiscuous_enabled ? "✅ Enabled" : "❌ Disabled"}"
   if promiscuous_enabled
     puts "   Auth Mode: #{promiscuous_auth_mode}"
