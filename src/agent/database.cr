@@ -1,10 +1,13 @@
 require "process"
+require "log"
 
 module AgentDatabase
+  Log = ::Log.for(self)
+
   # Execute PostgreSQL query
   def self.execute_psql_query(host : String, port : Int32, dbname : String, query : String, username : String?, password : String?)
-    puts "Executing PostgreSQL query on #{host}:#{port}/#{dbname}"
-    puts "Query: #{query}"
+    Log.debug { "PostgreSQL query on #{host}:#{port}/#{dbname}" }
+    Log.debug { "Query: #{query}" }
 
     begin
       # Use psql with environment variable to avoid password prompt
@@ -28,8 +31,8 @@ module AgentDatabase
 
   # Execute MySQL query
   def self.execute_mysql_query(host : String, port : Int32, dbname : String, query : String)
-    puts "Executing MySQL query on #{host}:#{port}/#{dbname}"
-    puts "Query: #{query}"
+    Log.debug { "MySQL query on #{host}:#{port}/#{dbname}" }
+    Log.debug { "Query: #{query}" }
 
     begin
       # Use mysql with batch mode to avoid password prompt
@@ -49,7 +52,8 @@ module AgentDatabase
 
   # Execute database command and parse results
   private def self.execute_db_command(command : String, delimiter : String, db_type : String)
-    puts "Executing: #{command}" if CLI.debug_mode
+    # Note: command logged at debug level only - may contain credentials in env vars
+    Log.debug { "Executing DB command for #{db_type}" }
 
     process = Process.new(
       command,

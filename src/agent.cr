@@ -33,6 +33,7 @@ require "base58"
 require "crypto/subtle"
 require "openssl"
 require "base64"
+require "log"
 
 # Agent modules
 require "./agent/oauth"
@@ -47,6 +48,8 @@ require "./agent/cli"
 VERSION = {{ read_file("VERSION").strip }}
 
 class GentilityAgent
+  Log = ::Log.for(self)
+
   @websocket : HTTP::WebSocket?
   @machine_key : String? # Ed25519 private key (if provisioned)
   @oauth_token : String? # OAuth access token (if using OAuth)
@@ -229,7 +232,7 @@ class GentilityAgent
     File.write(config_file, config_hash.to_yaml)
     File.chmod(config_file, 0o640)
   rescue ex : Exception
-    puts "Warning: Could not save security configuration to file: #{ex.message}"
+    Log.warn { "Could not save security configuration: #{ex.message}" }
   end
 
   private def save_security_config_clear_lockout
@@ -263,15 +266,17 @@ class GentilityAgent
   end
 
   def start
+    # Configure log level based on debug mode
+    log_level = CLI.debug_mode ? ::Log::Severity::Debug : ::Log::Severity::Info
+    ::Log.setup(log_level, ::Log::IOBackend.new)
+
     config_file = AgentConfig.get_config_path
-    puts "Starting Gentility Agent v#{VERSION}..."
-    puts "Config: #{config_file}#{File.exists?(config_file) ? "" : " (not found)"}"
-    puts "Nickname: #{@nickname}"
-    puts "Environment: #{@environment}"
-    puts "Server: #{@server_url}"
-    puts "Debug mode: #{CLI.debug_mode ? "enabled" : "disabled"}"
-    puts ""
-    puts ""
+    Log.info { "Starting Gentility Agent v#{VERSION}" }
+    Log.info { "Config: #{config_file}#{File.exists?(config_file) ? "" : " (not found)"}" }
+    Log.info { "Nickname: #{@nickname}" }
+    Log.info { "Environment: #{@environment}" }
+    Log.info { "Server: #{@server_url}" }
+    Log.debug { "Debug logging enabled" }
 
     @running = true
     retry_count = 0
@@ -294,38 +299,55 @@ class GentilityAgent
 
         # If we get here, the connection was closed
         if @running
-          puts "Connection lost, will attempt to reconnect..."
+          Log.warn { "Connection lost, will attempt to reconnect" }
         end
       rescue ex : Exception
         if @running
           retry_count += 1
-          puts "Connection error (attempt #{retry_count}): #{ex.message}"
+          # Log connection error with context (no sensitive data like tokens)
+          uri = URI.parse(@server_url)
+          Log.error { "Connection failed to #{uri.host}:#{uri.port || 443} (attempt #{retry_count})" }
+          Log.error { "  #{ex.class.name}: #{ex.message}" }
+
+          # Provide helpful context for common errors
+          error_msg = ex.message || ""
+          if error_msg.includes?("getaddrinfo") || error_msg.includes?("Name or service not known")
+            Log.error { "  Hint: DNS resolution failed - check hostname and network connectivity" }
+          elsif error_msg.includes?("Connection refused")
+            Log.error { "  Hint: Server not accepting connections - check if server is running" }
+          elsif error_msg.includes?("SSL") || error_msg.includes?("TLS") || error_msg.includes?("certificate")
+            Log.error { "  Hint: TLS/SSL error - check certificate validity and server configuration" }
+          elsif error_msg.includes?("timed out") || error_msg.includes?("timeout")
+            Log.error { "  Hint: Connection timed out - check firewall rules and network path" }
+          elsif error_msg.includes?("reset by peer")
+            Log.error { "  Hint: Connection reset - server may have rejected the connection" }
+          end
 
           if max_retries > 0 && retry_count >= max_retries
-            puts "Maximum retry attempts (#{max_retries}) reached. Exiting..."
+            Log.error { "Maximum retry attempts (#{max_retries}) reached, exiting" }
             exit 1
           else
             # Exponential backoff with jitter
             jitter = Random.rand * 0.3 * current_backoff # Add 0-30% jitter
             wait_time = current_backoff + jitter
 
-            puts "Waiting #{wait_time.round(1)} seconds before reconnection attempt (exponential backoff)..."
+            Log.info { "Retrying in #{wait_time.round(1)}s (backoff)" }
             sleep wait_time.seconds
 
             # Double the backoff for next time, but cap at max_backoff
             current_backoff = [current_backoff * 2.0, max_backoff].min
 
-            puts "Attempting to reconnect..."
+            Log.info { "Reconnecting..." }
           end
         end
       end
     end
 
-    puts "Agent stopped."
+    Log.info { "Agent stopped" }
   end
 
   def stop
-    puts "Stopping agent..."
+    Log.info { "Stopping agent" }
     @running = false
     @graceful_shutdown = true
 
@@ -336,15 +358,13 @@ class GentilityAgent
   end
 
   def reload_security_config
-    puts "Reloading security configuration..."
+    Log.info { "Reloading security configuration" }
     load_security_config
-    puts "Security configuration reloaded"
+    Log.info { "Security configuration reloaded" }
   end
 
   private def debug_log(message : String)
-    if CLI.debug_mode
-      puts "[DEBUG] #{Time.local.to_s("%Y-%m-%d %H:%M:%S")} #{message}"
-    end
+    Log.debug { message }
   end
 
   private def connect
@@ -380,7 +400,8 @@ class GentilityAgent
       end
     )
 
-    puts "Connecting to #{ws_uri}..."
+    # Log connection attempt (sanitized - no tokens in query string)
+    Log.info { "Connecting to #{ws_uri.host}:#{ws_uri.port || 443}#{ws_uri.path}" }
 
     # Connect to WebSocket
     @websocket = HTTP::WebSocket.new(ws_uri)
@@ -392,7 +413,7 @@ class GentilityAgent
 
     @websocket.not_nil!.on_close do |close_code, message|
       unless @graceful_shutdown
-        puts "WebSocket closed: #{close_code} - #{message}"
+        Log.warn { "WebSocket closed: #{close_code} - #{message}" }
       end
       @websocket = nil
     end
@@ -409,7 +430,7 @@ class GentilityAgent
     sleep 1.second
 
     if @websocket && !@websocket.not_nil!.closed?
-      puts "Connected successfully!"
+      Log.info { "Connected successfully" }
 
       # Start ping mechanism
       start_ping_loop
@@ -422,27 +443,26 @@ class GentilityAgent
   end
 
   private def handle_message(message : String)
-    debug_log("← Received message (#{message.size} bytes)")
+    Log.debug { "← Received message (#{message.size} bytes)" }
 
     begin
       # Parse JSON
       data = JSON.parse(message)
-      debug_log("← Parsed: #{data.inspect}")
+      Log.debug { "← Parsed: #{data.inspect}" }
 
       # Handle the parsed JSON data
       handle_parsed_message(data)
     rescue ex : Exception
-      puts "Error parsing JSON message: #{ex.message}"
-      debug_log("← Parse error: #{ex.message}")
+      Log.error { "Error parsing JSON message: #{ex.message}" }
     end
   end
 
   private def handle_parsed_message(msg : JSON::Any)
     case msg["type"]?.try(&.to_s)
     when "welcome"
-      puts "✅ Connected to server!"
+      Log.info { "Server accepted connection" }
       machine_id = msg["machine_id"]?.try(&.to_s)
-      puts "Machine ID: #{machine_id}" if machine_id
+      Log.info { "Machine ID: #{machine_id}" } if machine_id
 
       # Handle server's X25519 public key and derive shared secret
       if server_x25519_b64 = msg["x25519_pubkey"]?.try(&.to_s)
@@ -451,30 +471,27 @@ class GentilityAgent
             server_pubkey = Base64.decode(server_x25519_b64)
 
             if server_pubkey.size != 32
-              puts "Warning: Invalid server X25519 public key size (got #{server_pubkey.size} bytes)" if CLI.debug_mode
+              Log.debug { "Invalid server X25519 public key size (got #{server_pubkey.size} bytes)" }
             else
               # Derive shared secret using ECDH
               @x25519_shared_secret = AgentCrypto.x25519_ecdh(@x25519_private_key.not_nil!, server_pubkey)
 
-              if CLI.debug_mode
-                shared_secret_b64 = Base64.strict_encode(@x25519_shared_secret.not_nil!)
-                # Validate the shared secret
-                if @x25519_shared_secret.not_nil!.all? { |b| b == 0 }
-                  puts "⚠️  Warning: Shared secret is all zeros (ECDH may have failed)"
-                elsif @x25519_shared_secret.not_nil!.size != 32
-                  puts "⚠️  Warning: Shared secret has invalid size: #{@x25519_shared_secret.not_nil!.size} bytes"
-                else
-                  puts "✅ Shared secret established for secure credential exchange"
-                  puts "   Shared Secret (base64): #{shared_secret_b64}"
-                  puts "   Size: #{@x25519_shared_secret.not_nil!.size} bytes"
-                end
+              shared_secret_b64 = Base64.strict_encode(@x25519_shared_secret.not_nil!)
+              # Validate the shared secret
+              if @x25519_shared_secret.not_nil!.all? { |b| b == 0 }
+                Log.warn { "Shared secret is all zeros (ECDH may have failed)" }
+              elsif @x25519_shared_secret.not_nil!.size != 32
+                Log.warn { "Shared secret has invalid size: #{@x25519_shared_secret.not_nil!.size} bytes" }
+              else
+                Log.info { "Secure credential exchange established" }
+                Log.debug { "Shared Secret (base64): #{shared_secret_b64}" }
               end
             end
           rescue ex
-            puts "Warning: Failed to derive shared secret: #{ex.message}" if CLI.debug_mode
+            Log.debug { "Failed to derive shared secret: #{ex.message}" }
           end
         else
-          puts "Warning: Server sent X25519 public key but agent has no X25519 private key" if CLI.debug_mode
+          Log.debug { "Server sent X25519 public key but agent has no X25519 private key" }
         end
       end
 
@@ -485,53 +502,40 @@ class GentilityAgent
       error_code = msg["error"]?.try(&.to_s)
       error_message = msg["message"]?.try(&.to_s) || "Unknown error"
 
-      puts ""
-      puts "❌ Server Error: #{error_message}"
+      Log.error { "Server error: #{error_message}" }
 
       # Handle specific error cases
       case error_code
       when "token_expired", "invalid_token"
-        puts ""
-        puts "Your OAuth token has expired or is invalid."
-        puts "Please re-authenticate by running:"
-        puts "  gentility auth"
-        puts ""
+        Log.error { "OAuth token expired or invalid. Re-authenticate with: gentility auth" }
         exit 1
       when "insufficient_scope"
-        puts ""
-        puts "Your OAuth token is missing required scopes."
-        puts "Please re-authenticate by running:"
-        puts "  gentility auth"
-        puts ""
+        Log.error { "OAuth token missing required scopes. Re-authenticate with: gentility auth" }
         exit 1
       else
-        puts ""
-        puts "Error code: #{error_code}" if error_code
+        Log.error { "Error code: #{error_code}" } if error_code
         exit 1
       end
     when "ping"
       # Respond to ping with security status
+      Log.debug { "Received ping, sending pong" }
       response = {"type" => "pong", "timestamp" => Time.utc.to_unix_f}
       response = response.merge(Security.status)
       send_message(response)
     when "pong"
       # Handle pong response (server responding to our ping)
-      if CLI.debug_mode
-        timestamp = msg["timestamp"]?.try(&.as_f?)
-        if timestamp
-          # Calculate round-trip time if we want
-          current_time = Time.utc.to_unix_f
-          rtt = current_time - timestamp
-          puts "Received pong from server (RTT: #{(rtt * 1000).round(2)}ms)" if rtt > 0
-        else
-          puts "Received pong from server"
-        end
+      timestamp = msg["timestamp"]?.try(&.as_f?)
+      if timestamp
+        rtt = Time.utc.to_unix_f - timestamp
+        Log.debug { "Received pong (RTT: #{(rtt * 1000).round(2)}ms)" } if rtt > 0
+      else
+        Log.debug { "Received pong" }
       end
     when "command"
       handle_command(msg)
     else
-      puts "Unknown message type: #{msg["type"]?}"
-      puts "Full message: #{msg}"
+      Log.warn { "Unknown message type: #{msg["type"]?}" }
+      Log.debug { "Full message: #{msg}" }
     end
   end
 
@@ -540,10 +544,10 @@ class GentilityAgent
     command = msg["command"]?.try(&.to_s)
     params = msg["params"]?
 
-    puts "Received command: #{command} (#{request_id})"
+    Log.debug { "Received command: #{command} (#{request_id})" }
 
     unless request_id && command
-      puts "Invalid command message - missing request_id or command"
+      Log.warn { "Invalid command message - missing request_id or command" }
       return
     end
 
@@ -559,19 +563,19 @@ class GentilityAgent
   end
 
   private def handle_ecdh_test(msg : JSON::Any)
-    puts "Received ECDH test request"
+    Log.debug { "Received ECDH test request" }
 
     version = msg["v"]?.try(&.as_i?) || 1
     cleartext = msg["cleartext"]?.try(&.to_s)
     ciphertext_b64 = msg["ciphertext"]?.try(&.to_s)
 
     unless cleartext && ciphertext_b64
-      puts "Error: Missing cleartext or ciphertext in ecdh_test"
+      Log.warn { "ECDH test missing cleartext or ciphertext" }
       return
     end
 
     unless @x25519_shared_secret
-      puts "Error: No shared secret established - cannot perform ECDH test"
+      Log.warn { "ECDH test failed: no shared secret established" }
       send_message({
         "type" => "ecdh_test_response",
         "v" => version,
@@ -593,9 +597,12 @@ class GentilityAgent
       # Check if decrypted matches cleartext
       success = (decrypted == cleartext)
 
-      puts "ECDH Test: #{success ? "✅ SUCCESS" : "❌ FAILED"}"
-      puts "  Expected: #{cleartext}"
-      puts "  Got: #{decrypted}"
+      if success
+        Log.debug { "ECDH test passed" }
+      else
+        Log.warn { "ECDH test failed: decryption mismatch" }
+        Log.debug { "Expected: #{cleartext}, Got: #{decrypted}" }
+      end
 
       send_message({
         "type" => "ecdh_test_response",
@@ -605,7 +612,7 @@ class GentilityAgent
         "payload" => decrypted
       })
     rescue ex
-      puts "ECDH Test Failed: #{ex.message}"
+      Log.error { "ECDH test exception: #{ex.message}" }
       send_message({
         "type" => "ecdh_test_response",
         "v" => version,
@@ -1160,7 +1167,7 @@ class GentilityAgent
       "status" => status,
     })
   rescue ex : Exception
-    puts "Error sending status: #{ex.message}"
+    Log.error { "Error sending status: #{ex.message}" }
   end
 
   private def get_hostname : String
@@ -1245,11 +1252,10 @@ class GentilityAgent
 
     begin
       json = data.to_json
-      debug_log("→ Sending JSON message (#{json.size} bytes)")
+      Log.debug { "→ Sending JSON message (#{json.size} bytes)" }
       websocket.send(json)
     rescue ex : Exception
-      puts "Error sending message: #{ex.message}"
-      debug_log("→ Send error: #{ex.message}")
+      Log.error { "Error sending message: #{ex.message}" }
     end
   end
 
@@ -1264,11 +1270,9 @@ class GentilityAgent
     end
 
     if credentials.empty?
-      puts "No credentials stored"
-      puts ""
-      puts "Add credentials with: gentility credentials add <name>"
+      Log.info { "No credentials stored. Add with: gentility credentials add <name>" }
     else
-      puts "Advertising #{credentials.size} credential(s) to server"
+      Log.info { "Advertising #{credentials.size} credential(s) to server" }
     end
 
     send_message({
@@ -1276,8 +1280,7 @@ class GentilityAgent
       "credentials" => credential_list,
     })
   rescue ex : Exception
-    puts "Warning: Failed to advertise credentials: #{ex.message}"
-    debug_log("Error advertising credentials: #{ex.message}")
+    Log.warn { "Failed to advertise credentials: #{ex.message}" }
   end
 end
 
