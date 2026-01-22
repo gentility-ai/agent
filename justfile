@@ -285,6 +285,40 @@ repo-sync-remote remote_path:
 release type="patch":
     #!/bin/bash
     set -e
+
+    # Calculate what the new version will be
+    current_version=$(cat VERSION)
+    IFS='.' read -r major minor patch <<< "$current_version"
+
+    if [ "{{type}}" = "major" ]; then
+        new_version="$((major + 1)).0.0"
+    elif [ "{{type}}" = "minor" ]; then
+        new_version="$major.$((minor + 1)).0"
+    else
+        new_version="$major.$minor.$((patch + 1))"
+    fi
+
+    # Show release preview
+    echo ""
+    echo "═══════════════════════════════════════════════════"
+    echo "  Release Preview"
+    echo "═══════════════════════════════════════════════════"
+    echo ""
+    echo "  Current version:  v${current_version}"
+    echo "  New version:      v${new_version}"
+    echo "  Release type:     {{type}}"
+    echo ""
+    echo "═══════════════════════════════════════════════════"
+    echo ""
+
+    # Ask for confirmation
+    read -p "Proceed with release? [y/N] " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        echo "❌ Release cancelled"
+        exit 1
+    fi
+
+    echo ""
     echo "🚀 Starting automated release workflow..."
 
     # Bump version
