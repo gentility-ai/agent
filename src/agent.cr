@@ -625,6 +625,7 @@ class GentilityAgent
   private def execute_command(command : String, params : JSON::Any?)
     case command
     when "ping"
+      Log.info { "Connection test ping received" }
       {"status" => "pong", "timestamp" => Time.utc.to_unix_f}
     when "system_info"
       get_system_info

@@ -6,7 +6,7 @@ module AgentDatabase
 
   # Execute PostgreSQL query
   def self.execute_psql_query(host : String, port : Int32, dbname : String, query : String, username : String?, password : String?)
-    Log.debug { "PostgreSQL query on #{host}:#{port}/#{dbname}" }
+    Log.info { "PostgreSQL query request - #{host}:#{port}/#{dbname}" }
     Log.debug { "Query: #{query}" }
 
     begin
@@ -31,7 +31,7 @@ module AgentDatabase
 
   # Execute MySQL query
   def self.execute_mysql_query(host : String, port : Int32, dbname : String, query : String)
-    Log.debug { "MySQL query on #{host}:#{port}/#{dbname}" }
+    Log.info { "MySQL query request - #{host}:#{port}/#{dbname}" }
     Log.debug { "Query: #{query}" }
 
     begin
@@ -77,6 +77,7 @@ module AgentDatabase
                end
              end
 
+      Log.info { "#{db_type} query succeeded - #{rows.size} rows returned" }
       {
         "success"   => true,
         "rows"      => rows,
@@ -90,6 +91,7 @@ module AgentDatabase
         error_message = "#{db_type} authentication required. Please configure credentials on the agent server."
       end
 
+      Log.warn { "#{db_type} query failed: #{error_message}" }
       {
         "success"   => false,
         "error"     => error_message,
