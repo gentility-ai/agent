@@ -59,8 +59,8 @@ class GentilityAgent
   @running : Bool = false
   @graceful_shutdown : Bool = false
   @ping_fiber : Fiber?
-  @last_ping_sent : Time::Instant = Time.instant
-  @last_pong_received : Time::Instant = Time.instant
+  @last_ping_sent : Time::Span = Time.monotonic
+  @last_pong_received : Time::Span = Time.monotonic
   @ping_in_flight : Bool = false
 
   # Ping/pong timeout configuration
@@ -531,7 +531,7 @@ class GentilityAgent
       send_message(response)
     when "pong"
       # Handle pong response (server responding to our ping)
-      @last_pong_received = Time.instant
+      @last_pong_received = Time.monotonic
       @ping_in_flight = false
       timestamp = msg["timestamp"]?.try(&.as_f?)
       if timestamp
@@ -1240,8 +1240,8 @@ class GentilityAgent
 
   private def start_ping_loop
     # Reset ping tracking state for new connection
-    @last_pong_received = Time.instant
-    @last_ping_sent = Time.instant
+    @last_pong_received = Time.monotonic
+    @last_ping_sent = Time.monotonic
     @ping_in_flight = false
 
     @ping_fiber = spawn do
@@ -1254,7 +1254,7 @@ class GentilityAgent
 
         # Check if previous ping timed out (no pong received)
         if @ping_in_flight
-          time_since_ping = Time.instant - @last_ping_sent
+          time_since_ping = Time.monotonic - @last_ping_sent
           if time_since_ping > PONG_TIMEOUT
             Log.warn { "Pong timeout: no response in #{time_since_ping.total_seconds.round(1)}s - connection presumed dead" }
             # Close the websocket to trigger reconnection
@@ -1268,7 +1268,7 @@ class GentilityAgent
         end
 
         # Send ping and track it
-        @last_ping_sent = Time.instant
+        @last_ping_sent = Time.monotonic
         @ping_in_flight = true
         send_message({"type" => "ping", "timestamp" => Time.utc.to_unix_f})
         Log.debug { "Sent ping" }
