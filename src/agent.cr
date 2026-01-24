@@ -59,6 +59,13 @@ class GentilityAgent
   @running : Bool = false
   @graceful_shutdown : Bool = false
   @ping_fiber : Fiber?
+  @last_ping_sent : Time::Instant = Time.instant
+  @last_pong_received : Time::Instant = Time.instant
+  @ping_in_flight : Bool = false
+
+  # Ping/pong timeout configuration
+  PING_INTERVAL      = 30.seconds  # Send ping every 30 seconds
+  PONG_TIMEOUT       = 60.seconds  # Consider connection dead if no pong within 60 seconds
   @signing_key : Ed25519::SigningKey?
   @public_key : String?
   @x25519_private_key : Bytes?
@@ -524,6 +531,8 @@ class GentilityAgent
       send_message(response)
     when "pong"
       # Handle pong response (server responding to our ping)
+      @last_pong_received = Time.instant
+      @ping_in_flight = false
       timestamp = msg["timestamp"]?.try(&.as_f?)
       if timestamp
         rtt = Time.utc.to_unix_f - timestamp
@@ -1230,16 +1239,39 @@ class GentilityAgent
   end
 
   private def start_ping_loop
+    # Reset ping tracking state for new connection
+    @last_pong_received = Time.instant
+    @last_ping_sent = Time.instant
+    @ping_in_flight = false
+
     @ping_fiber = spawn do
       loop do
         break unless @running && @websocket && !@websocket.not_nil!.closed?
 
-        # Send ping every 60 seconds
-        sleep 60.seconds
+        sleep PING_INTERVAL
 
-        if @websocket && !@websocket.not_nil!.closed?
-          send_message({"type" => "ping", "timestamp" => Time.utc.to_unix_f})
+        break unless @running && @websocket && !@websocket.not_nil!.closed?
+
+        # Check if previous ping timed out (no pong received)
+        if @ping_in_flight
+          time_since_ping = Time.instant - @last_ping_sent
+          if time_since_ping > PONG_TIMEOUT
+            Log.warn { "Pong timeout: no response in #{time_since_ping.total_seconds.round(1)}s - connection presumed dead" }
+            # Close the websocket to trigger reconnection
+            @websocket.try(&.close)
+            break
+          else
+            # Still waiting for pong, don't send another ping yet
+            Log.debug { "Waiting for pong (#{time_since_ping.total_seconds.round(1)}s since ping)" }
+            next
+          end
         end
+
+        # Send ping and track it
+        @last_ping_sent = Time.instant
+        @ping_in_flight = true
+        send_message({"type" => "ping", "timestamp" => Time.utc.to_unix_f})
+        Log.debug { "Sent ping" }
       end
     end
   end
