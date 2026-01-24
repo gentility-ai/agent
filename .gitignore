@@ -71,3 +71,4 @@ notes/
 # Worktrees
 .worktrees/
 gentility
+.private-journal/
