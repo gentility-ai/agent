@@ -50,7 +50,7 @@ module Security
   def self.persist_lockout
     # Returns hash to be saved to config
     {
-      "locked_out" => @@locked_out,
+      "locked_out"    => @@locked_out,
       "lockout_until" => @@lockout_until ? @@lockout_until.not_nil!.to_unix_f : nil,
     }
   end
@@ -261,7 +261,7 @@ module Security
 
       if @@lockout_until
         status_hash = status_hash.merge({
-          "lockout_until" => @@lockout_until.not_nil!.to_unix_f
+          "lockout_until" => @@lockout_until.not_nil!.to_unix_f,
         })
       end
     end

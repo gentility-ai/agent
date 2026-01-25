@@ -1056,26 +1056,26 @@ def show_status
 
   # Service status (Linux only)
   {% if flag?(:linux) %}
-  puts "🔄 Service Status:"
-  begin
-    result = `systemctl is-active #{CLI::SYSTEMD_SERVICE} 2>/dev/null`.strip
-    case result
-    when "active"
-      puts "   ✅ Running"
-    when "inactive"
-      puts "   ❌ Stopped"
-    when "failed"
-      puts "   ❌ Failed"
-    else
-      puts "   ❓ Unknown (#{result})"
-    end
+    puts "🔄 Service Status:"
+    begin
+      result = `systemctl is-active #{CLI::SYSTEMD_SERVICE} 2>/dev/null`.strip
+      case result
+      when "active"
+        puts "   ✅ Running"
+      when "inactive"
+        puts "   ❌ Stopped"
+      when "failed"
+        puts "   ❌ Failed"
+      else
+        puts "   ❓ Unknown (#{result})"
+      end
 
-    enabled = `systemctl is-enabled #{CLI::SYSTEMD_SERVICE} 2>/dev/null`.strip
-    puts "   Auto-start: #{enabled == "enabled" ? "✅ Enabled" : "❌ Disabled"}"
-  rescue
-    puts "   ❓ Unable to check service status"
-  end
-  puts ""
+      enabled = `systemctl is-enabled #{CLI::SYSTEMD_SERVICE} 2>/dev/null`.strip
+      puts "   Auto-start: #{enabled == "enabled" ? "✅ Enabled" : "❌ Disabled"}"
+    rescue
+      puts "   ❓ Unable to check service status"
+    end
+    puts ""
   {% end %}
 
   # Promiscuous mode
@@ -1117,12 +1117,12 @@ def show_logs(follow : Bool = false, lines : Int32 = 100)
     alt_log_file = "/usr/local/var/log/gentility.log"
 
     actual_log = if File.exists?(log_file)
-      log_file
-    elsif File.exists?(alt_log_file)
-      alt_log_file
-    else
-      nil
-    end
+                   log_file
+                 elsif File.exists?(alt_log_file)
+                   alt_log_file
+                 else
+                   nil
+                 end
 
     if actual_log
       if follow

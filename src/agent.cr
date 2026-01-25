@@ -59,13 +59,14 @@ class GentilityAgent
   @running : Bool = false
   @graceful_shutdown : Bool = false
   @ping_fiber : Fiber?
-  @last_ping_sent : Time::Span = Time.monotonic
-  @last_pong_received : Time::Span = Time.monotonic
+  @last_ping_sent : Time::Instant = Time.instant
+  @last_pong_received : Time::Instant = Time.instant
   @ping_in_flight : Bool = false
+  @start_time : Time::Instant = Time.instant
 
   # Ping/pong timeout configuration
-  PING_INTERVAL      = 30.seconds  # Send ping every 30 seconds
-  PONG_TIMEOUT       = 60.seconds  # Consider connection dead if no pong within 60 seconds
+  PING_INTERVAL = 30.seconds # Send ping every 30 seconds
+  PONG_TIMEOUT  = 60.seconds # Consider connection dead if no pong within 60 seconds
   @signing_key : Ed25519::SigningKey?
   @public_key : String?
   @x25519_private_key : Bytes?
@@ -300,8 +301,19 @@ class GentilityAgent
         current_backoff = base_backoff
 
         # Keep the main fiber alive while connected
+        # Also independently monitor connection health (in case ping fiber is blocked)
         while @running && @websocket && !@websocket.not_nil!.closed?
           sleep 1.second
+
+          # Secondary health check: if no pong received for too long, connection is dead
+          # This catches cases where the ping fiber is blocked on a hung send()
+          time_since_pong = Time.instant - @last_pong_received
+          max_silence = PING_INTERVAL + PONG_TIMEOUT + 30.seconds # Allow some grace
+          if time_since_pong > max_silence
+            Log.warn { "Connection dead: no pong received in #{time_since_pong.total_seconds.round(0).to_i}s" }
+            @websocket.try(&.close)
+            break
+          end
         end
 
         # If we get here, the connection was closed
@@ -531,7 +543,7 @@ class GentilityAgent
       send_message(response)
     when "pong"
       # Handle pong response (server responding to our ping)
-      @last_pong_received = Time.monotonic
+      @last_pong_received = Time.instant
       @ping_in_flight = false
       timestamp = msg["timestamp"]?.try(&.as_f?)
       if timestamp
@@ -586,10 +598,10 @@ class GentilityAgent
     unless @x25519_shared_secret
       Log.warn { "ECDH test failed: no shared secret established" }
       send_message({
-        "type" => "ecdh_test_response",
-        "v" => version,
+        "type"    => "ecdh_test_response",
+        "v"       => version,
         "success" => false,
-        "error" => "No shared secret established"
+        "error"   => "No shared secret established",
       })
       return
     end
@@ -614,19 +626,19 @@ class GentilityAgent
       end
 
       send_message({
-        "type" => "ecdh_test_response",
-        "v" => version,
+        "type"    => "ecdh_test_response",
+        "v"       => version,
         "success" => success,
-        "iv" => iv_b64,
-        "payload" => decrypted
+        "iv"      => iv_b64,
+        "payload" => decrypted,
       })
     rescue ex
       Log.error { "ECDH test exception: #{ex.message}" }
       send_message({
-        "type" => "ecdh_test_response",
-        "v" => version,
+        "type"    => "ecdh_test_response",
+        "v"       => version,
         "success" => false,
-        "error" => ex.message || "Decryption failed"
+        "error"   => ex.message || "Decryption failed",
       })
     end
   end
@@ -1164,7 +1176,7 @@ class GentilityAgent
       "local_ip"      => get_local_ip,
       "environment"   => @environment,
       "nickname"      => @nickname,
-      "uptime"        => Time.monotonic.total_seconds,
+      "uptime"        => (Time.instant - @start_time).total_seconds,
       "timestamp"     => Time.utc.to_unix_f,
       "tools"         => get_available_tools,
     }
@@ -1240,38 +1252,48 @@ class GentilityAgent
 
   private def start_ping_loop
     # Reset ping tracking state for new connection
-    @last_pong_received = Time.monotonic
-    @last_ping_sent = Time.monotonic
+    @last_pong_received = Time.instant
+    @last_ping_sent = Time.instant
     @ping_in_flight = false
 
     @ping_fiber = spawn do
-      loop do
-        break unless @running && @websocket && !@websocket.not_nil!.closed?
+      begin
+        loop do
+          break unless @running && @websocket && !@websocket.not_nil!.closed?
 
-        sleep PING_INTERVAL
+          sleep PING_INTERVAL
 
-        break unless @running && @websocket && !@websocket.not_nil!.closed?
+          break unless @running && @websocket && !@websocket.not_nil!.closed?
 
-        # Check if previous ping timed out (no pong received)
-        if @ping_in_flight
-          time_since_ping = Time.monotonic - @last_ping_sent
-          if time_since_ping > PONG_TIMEOUT
-            Log.warn { "Pong timeout: no response in #{time_since_ping.total_seconds.round(1)}s - connection presumed dead" }
-            # Close the websocket to trigger reconnection
-            @websocket.try(&.close)
-            break
-          else
-            # Still waiting for pong, don't send another ping yet
-            Log.debug { "Waiting for pong (#{time_since_ping.total_seconds.round(1)}s since ping)" }
-            next
+          # Check if previous ping timed out (no pong received)
+          if @ping_in_flight
+            time_since_ping = Time.instant - @last_ping_sent
+            if time_since_ping > PONG_TIMEOUT
+              Log.warn { "Pong timeout: no response in #{time_since_ping.total_seconds.round(1)}s - connection presumed dead" }
+              # Close the websocket to trigger reconnection
+              @websocket.try(&.close)
+              break
+            else
+              # Still waiting for pong, don't send another ping yet
+              Log.debug { "Waiting for pong (#{time_since_ping.total_seconds.round(1)}s since ping)" }
+              next
+            end
           end
-        end
 
-        # Send ping and track it
-        @last_ping_sent = Time.monotonic
-        @ping_in_flight = true
-        send_message({"type" => "ping", "timestamp" => Time.utc.to_unix_f})
-        Log.debug { "Sent ping" }
+          # Send ping and track it
+          @last_ping_sent = Time.instant
+          @ping_in_flight = true
+          send_message({"type" => "ping", "timestamp" => Time.utc.to_unix_f})
+          Log.debug { "Sent ping" }
+        end
+      rescue ex : Exception
+        Log.error { "Connection monitor crashed: #{ex.class.name} - #{ex.message}" }
+      ensure
+        # If ping loop exits unexpectedly, close websocket to trigger reconnection
+        unless @graceful_shutdown
+          Log.warn { "Connection monitor exited, triggering reconnect" }
+          @websocket.try(&.close)
+        end
       end
     end
   end

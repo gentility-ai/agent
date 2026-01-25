@@ -13,7 +13,7 @@ struct CredentialMeta
 
   property name : String
   property uuid : String
-  property type : String  # "postgres" or "mysql"
+  property type : String # "postgres" or "mysql"
   property host : String
   property port : Int32
   property database : String
@@ -29,7 +29,7 @@ end
 
 # Parsed connection URL result
 struct ParsedConnectionURL
-  property type : String      # "postgres" or "mysql"
+  property type : String # "postgres" or "mysql"
   property host : String
   property port : Int32
   property database : String
