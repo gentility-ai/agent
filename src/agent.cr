@@ -311,7 +311,9 @@ class GentilityAgent
           max_silence = PING_INTERVAL + PONG_TIMEOUT + 30.seconds # Allow some grace
           if time_since_pong > max_silence
             Log.warn { "Connection dead: no pong received in #{time_since_pong.total_seconds.round(0).to_i}s" }
-            @websocket.try(&.close)
+            # Don't call close() - it writes to the socket and will block forever
+            # on a half-open TCP connection. Just abandon it.
+            @websocket = nil
             break
           end
         end
@@ -1270,8 +1272,8 @@ class GentilityAgent
             time_since_ping = Time.instant - @last_ping_sent
             if time_since_ping > PONG_TIMEOUT
               Log.warn { "Pong timeout: no response in #{time_since_ping.total_seconds.round(1)}s - connection presumed dead" }
-              # Close the websocket to trigger reconnection
-              @websocket.try(&.close)
+              # Don't call close() - blocks on half-open connections
+              @websocket = nil
               break
             else
               # Still waiting for pong, don't send another ping yet
@@ -1281,18 +1283,22 @@ class GentilityAgent
           end
 
           # Send ping and track it
+          # Spawn the send so the ping fiber never blocks on a half-open connection.
+          # If the send blocks, the throwaway fiber is abandoned, but this fiber
+          # stays alive to detect the pong timeout on the next iteration.
           @last_ping_sent = Time.instant
           @ping_in_flight = true
-          send_message({"type" => "ping", "timestamp" => Time.utc.to_unix_f})
+          spawn { send_message({"type" => "ping", "timestamp" => Time.utc.to_unix_f}) }
           Log.debug { "Sent ping" }
         end
       rescue ex : Exception
         Log.error { "Connection monitor crashed: #{ex.class.name} - #{ex.message}" }
       ensure
-        # If ping loop exits unexpectedly, close websocket to trigger reconnection
+        # If ping loop exits unexpectedly, signal main loop to reconnect
         unless @graceful_shutdown
           Log.warn { "Connection monitor exited, triggering reconnect" }
-          @websocket.try(&.close)
+          # Don't call close() - blocks on half-open connections
+          @websocket = nil
         end
       end
     end
