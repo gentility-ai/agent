@@ -118,6 +118,35 @@ if [ ! -f /etc/gentility.yaml ]; then
     chown gentility:gentility /etc/gentility.yaml
 fi
 
+# Offer sudo configuration if running interactively
+MANAGE_SUDO="/usr/lib/gentility-agent/manage-sudo.sh"
+if [ -t 0 ] && [ -f "$MANAGE_SUDO" ]; then
+    echo ""
+    echo "Would you like to grant the gentility agent sudo access?"
+    echo "  1) No sudo access (default)"
+    echo "  2) Limited (apt, systemctl, journalctl, dpkg, snap)"
+    echo "  3) Full (unrestricted)"
+    printf "Choose [1-3]: "
+
+    # Read with 30-second timeout, default to 1
+    if read -t 30 sudo_choice 2>/dev/null; then
+        case "$sudo_choice" in
+            2)
+                "$MANAGE_SUDO" enable limited
+                ;;
+            3)
+                "$MANAGE_SUDO" enable full
+                ;;
+            *)
+                echo "No sudo access configured."
+                ;;
+        esac
+    else
+        echo ""
+        echo "No input received, skipping sudo configuration."
+    fi
+fi
+
 # Reload systemd and enable the service
 systemctl daemon-reload
 systemctl enable gentility
@@ -153,6 +182,11 @@ echo "     install the relevant client for your database:"
 echo ""
 echo "     PostgreSQL:  sudo apt install postgresql-client"
 echo "     MySQL:       sudo apt install mysql-client"
+echo ""
+echo "  4. (Optional) Configure sudo access:"
+echo "     sudo gentility enable-sudo limited   # apt, systemctl, journalctl"
+echo "     sudo gentility enable-sudo full      # unrestricted sudo"
+echo "     sudo gentility disable-sudo          # remove sudo access"
 echo ""
 echo "View logs:"
 echo "  sudo journalctl -u gentility -f"
