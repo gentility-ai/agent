@@ -66,6 +66,22 @@ contents:
       owner: gentility
       group: gentility
 
+  # Script directory
+  - dst: /usr/lib/gentility-agent
+    type: dir
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  # Sudo management script
+  - src: ./scripts/manage-sudo.sh
+    dst: /usr/lib/gentility-agent/manage-sudo.sh
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
 scripts:
   preinstall: ./scripts/preinstall.sh
   postinstall: ./scripts/postinstall.sh
