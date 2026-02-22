@@ -1506,6 +1506,9 @@ def show_help
   puts "    security <mode>      Configure security settings"
   puts "    test-totp <code>     Test TOTP validation"
   puts "    promiscuous <action> Configure promiscuous mode"
+  puts "    enable-sudo [level]  Grant sudo access (limited or full, default: full)"
+  puts "    disable-sudo         Remove sudo access"
+  puts "    sudo-status          Show current sudo access level"
   puts "    version, -v, --version  Show version information"
   puts "    help, -h, --help     Show this help message"
   puts ""
@@ -1540,6 +1543,10 @@ def show_help
   puts "    disable              Disable promiscuous mode"
   puts "    status               Show promiscuous status"
   puts "    auth <password|totp> Set auth mode for promiscuous operations"
+  puts ""
+  puts "SUDO LEVELS:"
+  puts "    limited              apt, systemctl, journalctl, dpkg, snap"
+  puts "    full                 Unrestricted sudo (default)"
   puts ""
   puts "EXAMPLES:"
   puts "    # Step 1: Authenticate (required - provisions machine key)"
@@ -1579,6 +1586,41 @@ def show_help
   puts "    Config file: #{AgentConfig.get_config_path}"
   puts "    Service: sudo systemctl start gentility"
   puts ""
+end
+
+def handle_sudo_command(action : String, args : Array(String))
+  manage_sudo = "/usr/lib/gentility-agent/manage-sudo.sh"
+
+  unless File.exists?(manage_sudo)
+    puts "Error: #{manage_sudo} not found."
+    puts "This command is only available on Linux systems with the gentility-agent package installed."
+    exit 1
+  end
+
+  case action
+  when "enable"
+    level = args[0]? || "full"
+    unless level.in?(["limited", "full"])
+      puts "Usage: gentility enable-sudo [limited|full]"
+      puts "  limited  - apt, systemctl, journalctl, dpkg, snap"
+      puts "  full     - unrestricted (default)"
+      exit 1
+    end
+    status = Process.run("sudo", [manage_sudo, "enable", level],
+      output: Process::Redirect::Inherit,
+      error: Process::Redirect::Inherit)
+    exit status.exit_code
+  when "disable"
+    status = Process.run("sudo", [manage_sudo, "disable"],
+      output: Process::Redirect::Inherit,
+      error: Process::Redirect::Inherit)
+    exit status.exit_code
+  when "status"
+    status = Process.run(manage_sudo, ["status"],
+      output: Process::Redirect::Inherit,
+      error: Process::Redirect::Inherit)
+    exit status.exit_code
+  end
 end
 
 def main
@@ -1798,10 +1840,16 @@ def main
     when "credentials"
       handle_credentials_command(ARGV[1..-1])
       exit 0
+    when "enable-sudo"
+      handle_sudo_command("enable", ARGV[1..-1])
+    when "disable-sudo"
+      handle_sudo_command("disable", ARGV[1..-1])
+    when "sudo-status"
+      handle_sudo_command("status", ARGV[1..-1])
     else
       puts "Unknown command: #{ARGV[0]}"
       puts ""
-      puts "Available commands: run, start, status, setup, security, credentials, test-totp, promiscuous, version, help"
+      puts "Available commands: run, start, status, setup, security, credentials, test-totp, promiscuous, enable-sudo, disable-sudo, sudo-status, version, help"
       puts "For detailed help: gentility help or gentility -h"
       exit 1
     end
