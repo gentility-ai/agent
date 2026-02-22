@@ -13,6 +13,9 @@ systemctl daemon-reload
 
 # Only show removal message on actual removal, not upgrade
 if [ "$action" = "remove" ] || [ "$action" = "purge" ]; then
+    # Remove sudoers configuration
+    rm -f /etc/sudoers.d/gentility
+
     echo ""
     echo "Gentility AI Agent has been removed."
     echo "User data in /var/lib/gentility-agent and logs in /var/log/gentility-agent have been preserved."
