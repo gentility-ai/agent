@@ -120,7 +120,7 @@ fi
 
 # Offer sudo configuration if running interactively
 MANAGE_SUDO="/usr/lib/gentility-agent/manage-sudo.sh"
-if [ -t 0 ] && [ -f "$MANAGE_SUDO" ]; then
+if [ -t 0 ] && [ -f "$MANAGE_SUDO" ] && [ ! -f /etc/sudoers.d/gentility ]; then
     echo ""
     echo "Would you like to grant the gentility agent sudo access?"
     echo "  1) No sudo access (default)"

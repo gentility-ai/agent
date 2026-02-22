@@ -1597,6 +1597,8 @@ def handle_sudo_command(action : String, args : Array(String))
     exit 1
   end
 
+  is_root = `id -u`.strip == "0"
+
   case action
   when "enable"
     level = args[0]? || "full"
@@ -1606,19 +1608,37 @@ def handle_sudo_command(action : String, args : Array(String))
       puts "  full     - unrestricted (default)"
       exit 1
     end
-    status = Process.run("sudo", [manage_sudo, "enable", level],
-      output: Process::Redirect::Inherit,
-      error: Process::Redirect::Inherit)
+    if is_root
+      status = Process.run(manage_sudo, ["enable", level],
+        output: Process::Redirect::Inherit,
+        error: Process::Redirect::Inherit)
+    else
+      status = Process.run("sudo", [manage_sudo, "enable", level],
+        output: Process::Redirect::Inherit,
+        error: Process::Redirect::Inherit)
+    end
     exit status.exit_code
   when "disable"
-    status = Process.run("sudo", [manage_sudo, "disable"],
-      output: Process::Redirect::Inherit,
-      error: Process::Redirect::Inherit)
+    if is_root
+      status = Process.run(manage_sudo, ["disable"],
+        output: Process::Redirect::Inherit,
+        error: Process::Redirect::Inherit)
+    else
+      status = Process.run("sudo", [manage_sudo, "disable"],
+        output: Process::Redirect::Inherit,
+        error: Process::Redirect::Inherit)
+    end
     exit status.exit_code
   when "status"
-    status = Process.run(manage_sudo, ["status"],
-      output: Process::Redirect::Inherit,
-      error: Process::Redirect::Inherit)
+    if is_root
+      status = Process.run(manage_sudo, ["status"],
+        output: Process::Redirect::Inherit,
+        error: Process::Redirect::Inherit)
+    else
+      status = Process.run("sudo", [manage_sudo, "status"],
+        output: Process::Redirect::Inherit,
+        error: Process::Redirect::Inherit)
+    end
     exit status.exit_code
   end
 end

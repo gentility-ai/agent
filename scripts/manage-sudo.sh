@@ -5,7 +5,7 @@
 set -e
 
 SUDOERS_FILE="/etc/sudoers.d/gentility"
-SUDOERS_TMP="/tmp/gentility-sudoers.tmp"
+SUDOERS_TMP=""  # Set dynamically by do_enable via mktemp
 AGENT_USER="gentility"
 
 # Limited sudo: package management, service control, log viewing
@@ -37,6 +37,7 @@ check_root() {
 
 do_enable() {
     level="${1:-full}"
+    SUDOERS_TMP="$(mktemp /etc/sudoers.d/.gentility.tmp.XXXXXX)"
 
     case "$level" in
         limited)
@@ -48,6 +49,7 @@ do_enable() {
             label="full"
             ;;
         *)
+            rm -f "$SUDOERS_TMP"
             echo "Error: Unknown sudo level '$level'. Use 'limited' or 'full'."
             exit 1
             ;;
@@ -79,6 +81,11 @@ do_status() {
     if [ ! -f "$SUDOERS_FILE" ]; then
         echo "none"
         return
+    fi
+
+    if [ ! -r "$SUDOERS_FILE" ]; then
+        echo "Error: Cannot read $SUDOERS_FILE (try running with sudo)." >&2
+        exit 1
     fi
 
     if grep -q "NOPASSWD: ALL" "$SUDOERS_FILE"; then
