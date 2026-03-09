@@ -43,6 +43,7 @@ require "./agent/crypto"
 require "./agent/config"
 require "./agent/database"
 require "./agent/cli"
+require "./agent/websocket_connector"
 
 # Read version from VERSION file at compile time
 VERSION = {{ read_file("VERSION").strip }}
@@ -424,33 +425,36 @@ class GentilityAgent
     # Log connection attempt (sanitized - no tokens in query string)
     Log.info { "Connecting to #{ws_uri.host}:#{ws_uri.port || 443}#{ws_uri.path}" }
 
-    # Connect to WebSocket
-    @websocket = HTTP::WebSocket.new(ws_uri)
+    websocket = AgentWebSocketConnector.open(ws_uri)
 
     # Set up message handler
-    @websocket.not_nil!.on_message do |message|
-      handle_message(message)
+    websocket.on_message do |message|
+      if current_websocket?(websocket)
+        handle_message(message)
+      else
+        Log.debug { "Ignoring message from stale websocket" }
+      end
     end
 
-    @websocket.not_nil!.on_close do |close_code, message|
+    websocket.on_close do |close_code, message|
       unless @graceful_shutdown
         Log.warn { "WebSocket closed: #{close_code} - #{message}" }
       end
-      @websocket = nil
+      @websocket = nil if current_websocket?(websocket)
     end
+
+    @websocket = websocket
 
     # Note: HTTP::WebSocket doesn't have on_error callback
     # Errors will be handled in the rescue blocks
 
     # Start the WebSocket in a non-blocking way
-    spawn do
-      @websocket.not_nil!.run
-    end
+    start_websocket_reader(websocket)
 
     # Wait a bit for connection to establish
     sleep 1.second
 
-    if @websocket && !@websocket.not_nil!.closed?
+    if current_websocket?(websocket) && !websocket.closed?
       Log.info { "Connected successfully" }
 
       # Start ping mechanism
@@ -1304,6 +1308,32 @@ class GentilityAgent
     end
   end
 
+  private def start_websocket_reader(websocket : HTTP::WebSocket)
+    spawn do
+      begin
+        websocket.run
+      rescue ex : Exception
+        Log.error { "WebSocket reader crashed: #{ex.class.name} - #{ex.message}" }
+
+        begin
+          websocket.close unless websocket.closed?
+        rescue close_ex : Exception
+          Log.debug { "Failed to close crashed websocket: #{close_ex.class.name} - #{close_ex.message}" }
+        end
+
+        if current_websocket?(websocket)
+          Log.warn { "WebSocket reader died, forcing reconnect" } unless @graceful_shutdown
+          @websocket = nil
+        end
+      end
+    end
+  end
+
+  private def current_websocket?(websocket : HTTP::WebSocket) : Bool
+    current = @websocket
+    !!(current && current.same?(websocket))
+  end
+
   # Helper method to send a message as JSON
   private def send_message(data : Hash)
     debug_log("→ Sending: #{data.inspect}")
@@ -1316,7 +1346,11 @@ class GentilityAgent
       Log.debug { "→ Sending JSON message (#{json.size} bytes)" }
       websocket.send(json)
     rescue ex : Exception
-      Log.error { "Error sending message: #{ex.message}" }
+      Log.error { "Error sending message: #{ex.class.name} - #{ex.message}" }
+      if current_websocket?(websocket)
+        Log.warn { "Send failed, forcing reconnect" } unless @graceful_shutdown
+        @websocket = nil
+      end
     end
   end
 
