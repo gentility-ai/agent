@@ -97,17 +97,8 @@ jobs:
           path: packages/*
 
   build-macos:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            runner: macos-14
-          - arch: x86_64
-            runner: macos-13
-
-    runs-on: ${{ matrix.runner }}
-    name: macOS ${{ matrix.arch }}
+    runs-on: macos-14
+    name: macOS arm64
 
     steps:
       - uses: actions/checkout@v4
@@ -130,18 +121,18 @@ jobs:
           crystal build src/agent.cr \
             --release \
             --no-debug \
-            -o bin/gentility-agent-${{ steps.version.outputs.version }}-darwin-${{ matrix.arch }}
+            -o bin/gentility-agent-${{ steps.version.outputs.version }}-darwin-arm64
 
       - name: Create tarball
         run: |
           mkdir -p packages
-          tar -czf packages/gentility-agent-${{ steps.version.outputs.version }}-darwin-${{ matrix.arch }}.tar.gz \
-            -C bin gentility-agent-${{ steps.version.outputs.version }}-darwin-${{ matrix.arch }}
+          tar -czf packages/gentility-agent-${{ steps.version.outputs.version }}-darwin-arm64.tar.gz \
+            -C bin gentility-agent-${{ steps.version.outputs.version }}-darwin-arm64
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: macos-${{ matrix.arch }}
+          name: macos-arm64
           path: packages/*
 
   release:
