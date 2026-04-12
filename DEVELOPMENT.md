@@ -8,17 +8,12 @@ Internal build and release notes for the Gentility AI Agent.
 - [Just](https://github.com/casey/just)
 - [nfpm](https://nfpm.goreleaser.com/) for DEB/RPM packaging
 - [aptly](https://www.aptly.info/) and GPG for the package repository workflow
-- `ssh` and `rsync` only if you use the remote AMD64 build path
 
 ## Environment Setup
 
 Create a `.env` file only for the workflows you actually use:
 
 ```bash
-# Optional: remote Linux build host
-CORE7_IP="192.168.1.100"
-CORE7_USER="username"
-
 # Optional: package signing / DigitalOcean Spaces publishing
 GPG_KEY_ID="your-gpg-key-id"
 DO_ACCESS_KEY="your-access-key"
@@ -69,22 +64,17 @@ just build-dev
 # Native release build for the current platform
 just build
 
-# Remote Linux AMD64 build
-just build-remote-amd64
-
 # macOS binaries
 just build-macos
 just build-local-arm64
 just build-local-x86_64
-
-# Packages
-just package-amd64
-just package-macos
 ```
 
-The local `justfile` packaging flow is centered on AMD64 Linux packages. Multi-arch release artifacts are produced in CI.
+Local build targets are for development and manual verification. Release artifacts are produced in CI.
 
 ## Package Repository Workflow
+
+GitHub Actions is now the build source for release artifacts. If you need to publish the APT repository locally, first download the `.deb` package you want to publish into `./packages/`.
 
 ```bash
 # One-time local repo setup
@@ -92,9 +82,10 @@ just install-tools
 just repo-init
 just repo-create
 
-# Build and add a package
-just package-amd64
+# Add a GitHub-built package
 just repo-add-amd64
+# or a specific file:
+just repo-add-package packages/gentility-agent_<version>_amd64.deb
 
 # Publish locally and test
 just repo-publish-local
@@ -122,7 +113,6 @@ just setup-server
 ### Build Issues
 
 - Ensure dependencies are installed: `just install-deps`
-- Check remote build connectivity if you use it: `ssh ${CORE7_USER}@${CORE7_IP}`
 - Verify signing keys: `gpg --list-secret-keys`
 
 ### Repository Issues

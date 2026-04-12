@@ -26,7 +26,6 @@ build: install-deps
         crystal build src/agent.cr --release --static --no-debug -o {{bin_dir}}/{{binary_name}}; \
     else \
         echo "WARNING: Building on macOS - binary will be for native architecture"; \
-        echo "For Linux deployment, use 'just build-remote-amd64' instead"; \
         crystal build src/agent.cr --release --no-debug -o {{bin_dir}}/{{binary_name}}; \
     fi
     @echo "Binary built: {{bin_dir}}/{{binary_name}}"
@@ -37,26 +36,6 @@ build-dev: install-deps
     @mkdir -p {{bin_dir}}
     crystal build src/agent.cr -o {{bin_dir}}/{{binary_name}}
     @echo "Development binary built: {{bin_dir}}/{{binary_name}}"
-
-# Build on remote Linux machine (core7) for AMD64
-build-remote-amd64:
-    @echo "Building {{binary_name}} v{{version}} on remote Linux machine (core7) for AMD64..."
-    @if [ -f .env ]; then \
-        export $(cat .env | grep -v '^#' | xargs) && \
-        echo "Cleaning remote build directory..." && \
-        ssh ${CORE7_USER}@${CORE7_IP} "rm -rf /tmp/gentility-build/homebrew-agent" && \
-        echo "Syncing source to ${CORE7_USER}@${CORE7_IP}..." && \
-        rsync -avz --exclude-from=.rsyncignore ./ ${CORE7_USER}@${CORE7_IP}:/tmp/gentility-build/ && \
-        echo "Building on core7..." && \
-        ssh ${CORE7_USER}@${CORE7_IP} "cd /tmp/gentility-build && mkdir -p bin && shards install && crystal build src/agent.cr --release --static --no-debug -o bin/{{binary_name}}-{{version}}-linux-amd64" && \
-        echo "Fetching AMD64 binary from core7..." && \
-        mkdir -p {{bin_dir}} && \
-        scp ${CORE7_USER}@${CORE7_IP}:/tmp/gentility-build/bin/{{binary_name}}-{{version}}-linux-amd64 {{bin_dir}}/{{binary_name}}-{{version}}-linux-amd64 && \
-        echo "Linux AMD64 binary fetched: {{bin_dir}}/{{binary_name}}-{{version}}-linux-amd64"; \
-    else \
-        echo "Error: .env file not found. Please create it with CORE7_IP and CORE7_USER"; \
-        exit 1; \
-    fi
 
 # Build for macOS (detects current architecture)
 build-macos: install-deps
@@ -102,25 +81,41 @@ package-macos: build-macos
     tar -czf packages/$$archive_name -C {{bin_dir}} $$binary_name gentility.yaml.example; \
     echo "✅ macOS archive created: packages/$$archive_name"
 
-# Create DEB package for AMD64 
-package-amd64: build-remote-amd64
+# Create DEB package for AMD64 using an existing binary in ./bin
+package-amd64:
     @echo "Creating DEB package for AMD64..."
     @mkdir -p packages
+    @if [ ! -f "{{bin_dir}}/{{binary_name}}" ]; then \
+        echo "Error: {{bin_dir}}/{{binary_name}} not found."; \
+        echo "This justfile no longer builds release binaries."; \
+        echo "Use a prebuilt GitHub artifact or place the release binary at {{bin_dir}}/{{binary_name}}."; \
+        exit 1; \
+    fi
     @if [ -f "packages/{{binary_name}}_{{version}}_amd64.deb" ]; then \
         echo "⚠️  Package packages/{{binary_name}}_{{version}}_amd64.deb already exists!"; \
         echo "Removing existing package to rebuild with latest changes..."; \
         rm -f packages/{{binary_name}}_{{version}}_amd64.deb; \
     fi
-    @cp {{bin_dir}}/{{binary_name}}-{{version}}-linux-amd64 {{bin_dir}}/{{binary_name}}
     nfpm pkg --packager deb --config nfpm.yaml --target packages/{{binary_name}}_{{version}}_amd64.deb
-    @rm {{bin_dir}}/{{binary_name}}
     @echo "✅ DEB package created: packages/{{binary_name}}_{{version}}_amd64.deb"
 
-# Create DEB package for ARM64 (requires Linux ARM64 build)
+# Create DEB package for ARM64 using an existing binary in ./bin
 package-arm64:
     @echo "Creating DEB package for ARM64..."
-    @echo "ERROR: Linux ARM64 build not yet implemented. You'll need to build on a Linux ARM64 machine."
-    @exit 1
+    @mkdir -p packages
+    @if [ ! -f "{{bin_dir}}/{{binary_name}}" ]; then \
+        echo "Error: {{bin_dir}}/{{binary_name}} not found."; \
+        echo "This justfile no longer builds release binaries."; \
+        echo "Use a prebuilt GitHub artifact or place the release binary at {{bin_dir}}/{{binary_name}}."; \
+        exit 1; \
+    fi
+    @if [ -f "packages/{{binary_name}}_{{version}}_arm64.deb" ]; then \
+        echo "⚠️  Package packages/{{binary_name}}_{{version}}_arm64.deb already exists!"; \
+        echo "Removing existing package to rebuild with latest changes..."; \
+        rm -f packages/{{binary_name}}_{{version}}_arm64.deb; \
+    fi
+    nfpm pkg --packager deb --config nfpm-arm64.yaml --target packages/{{binary_name}}_{{version}}_arm64.deb
+    @echo "✅ DEB package created: packages/{{binary_name}}_{{version}}_arm64.deb"
 
 # Package all architectures
 package-all: package-amd64
@@ -136,8 +131,13 @@ repo-add-package package_file repo_name="gentility-main":
     @echo "Package added to repository"
 
 # Add AMD64 package to aptly repository
-repo-add-amd64 repo_name="gentility-main": package-amd64
+repo-add-amd64 repo_name="gentility-main":
     @echo "Adding AMD64 package to aptly repository '{{repo_name}}'..."
+    @if [ ! -f "packages/{{binary_name}}_{{version}}_amd64.deb" ]; then \
+        echo "Error: packages/{{binary_name}}_{{version}}_amd64.deb not found."; \
+        echo "Download the GitHub-built package first, or run 'just package-amd64' with a prebuilt binary in {{bin_dir}}/{{binary_name}}."; \
+        exit 1; \
+    fi
     aptly -config=configs/aptly.conf repo add {{repo_name}} packages/{{binary_name}}_{{version}}_amd64.deb
     @echo "AMD64 package added to repository"
 
@@ -162,8 +162,13 @@ repo-publish repo_name="gentility-main" distribution="stable":
     @echo "Repository published"
 
 # Update published repository
-repo-update repo_name="gentility-main" distribution="stable": package
+repo-update repo_name="gentility-main" distribution="stable":
     @echo "Updating repository with new package..."
+    @if [ ! -f "{{deb_file}}" ]; then \
+        echo "Error: {{deb_file}} not found."; \
+        echo "Download the GitHub-built package first, or add one under ./packages."; \
+        exit 1; \
+    fi
     aptly -config=configs/aptly.conf repo add {{repo_name}} {{deb_file}}
     aptly -config=configs/aptly.conf publish update {{distribution}}
     @echo "Repository updated and published"
@@ -228,8 +233,13 @@ repo-publish-s3 repo_name="gentility-main" distribution="stable":
     @echo "Repository published to DO Spaces"
 
 # Update local published repository
-repo-update-local repo_name="gentility-main" distribution="stable": package
+repo-update-local repo_name="gentility-main" distribution="stable":
     @echo "Updating local repository with new package..."
+    @if [ ! -f "{{deb_file}}" ]; then \
+        echo "Error: {{deb_file}} not found."; \
+        echo "Download the GitHub-built package first, or add one under ./packages."; \
+        exit 1; \
+    fi
     aptly -config=configs/aptly.conf repo add {{repo_name}} {{deb_file}}
     aptly -config=configs/aptly.conf publish update -distribution={{distribution}} local:{{distribution}}
     @echo "Local repository updated"
@@ -239,7 +249,7 @@ repo-update-s3 repo_name="gentility-main" distribution="stable":
     #!/bin/bash
     set -e
     echo "Updating DO Spaces repository with new package..."
-    current_version=$(cat .version-lock.json | jq -r '.current_version')
+    current_version=$(cat VERSION)
     deb_file="packages/{{binary_name}}_${current_version}_amd64.deb"
     
     if [ ! -f "$deb_file" ]; then
@@ -281,7 +291,7 @@ repo-sync-remote remote_path:
     rsync -avz --delete ./public/ {{remote_path}}
     @echo "Repository synced to remote server"
 
-# Complete release workflow (build, package, and deploy)
+# Complete release workflow (version, tag, and push)
 release type="patch":
     #!/bin/bash
     set -e
@@ -343,61 +353,6 @@ release type="patch":
     fi
 
     echo ""
-    echo "📦 Building and packaging..."
-    just package-amd64
-
-    echo ""
-    echo "📤 Adding to repository and deploying..."
-
-    # Try to add package, handle conflicts gracefully
-    if ! just repo-add-amd64; then
-        echo "⚠️  Package addition failed, attempting conflict resolution..."
-
-        # Remove any existing package with same name but different version
-        echo "🧹 Cleaning conflicting packages..."
-        aptly -config=configs/aptly.conf repo remove gentility-main 'gentility-agent' || echo "No existing packages to remove"
-
-        # Retry adding the package
-        echo "🔄 Retrying package addition..."
-        just repo-add-amd64
-    fi
-
-    # Deploy with conflict resolution (using current version)
-    echo "🚀 Publishing repository with version ${current_version}..."
-    if aptly -config=configs/aptly.conf publish list | grep -q "stable"; then
-        echo "Repository already published, updating..."
-        # Try normal update first (no force-overwrite warning)
-        if ! aptly -config=configs/aptly.conf publish update stable filesystem:local:debian 2>/dev/null; then
-            echo "⚠️  Normal update failed, trying with force-overwrite..."
-            if ! aptly -config=configs/aptly.conf publish update -force-overwrite stable filesystem:local:debian; then
-                echo "🚨 Force update failed, dropping and republishing..."
-                aptly -config=configs/aptly.conf publish drop stable filesystem:local:debian
-                if [ -f .env ]; then
-                    export $(cat .env | grep -v '^#' | xargs) && \
-                    aptly -config=configs/aptly.conf publish repo -distribution=stable -gpg-key="${GPG_KEY_ID}" gentility-main filesystem:local:debian
-                else
-                    aptly -config=configs/aptly.conf publish repo -distribution=stable -gpg-key=85C6BE5B453A071B gentility-main filesystem:local:debian
-                fi
-            fi
-        fi
-    else
-        echo "Publishing repository for first time..."
-        if [ -f .env ]; then
-            export $(cat .env | grep -v '^#' | xargs) && \
-            aptly -config=configs/aptly.conf publish repo -distribution=stable -gpg-key="${GPG_KEY_ID}" gentility-main filesystem:local:debian
-        else
-            aptly -config=configs/aptly.conf publish repo -distribution=stable -gpg-key=85C6BE5B453A071B gentility-main filesystem:local:debian
-        fi
-    fi
-
-    echo "📤 Deploying to packages.gentility.ai..."
-    if which ansible-playbook >/dev/null; then
-        ansible-playbook -i ansible/inventory/hosts.yml ansible/playbooks/deploy-packages.yml
-    else
-        echo "⚠️  Ansible not found, skipping remote deployment. Repository published locally to ./public/"
-    fi
-
-    echo ""
     echo "📝 Committing version changes..."
     # Stage only release-related files
     git add VERSION nfpm.yaml nfpm-arm64.yaml justfile Formula/gentility-agent.rb  README.md 2>/dev/null || true
@@ -417,86 +372,12 @@ release type="patch":
     git push origin master --tags
 
     echo ""
-    echo "📦 Creating GitHub release..."
-    # Build macOS ARM64 binary only (we only support ARM64)
-    echo "🍎 Building macOS ARM64 binary..."
-    if ! just build-local-arm64; then
-        echo "⚠️  macOS ARM64 build failed, continuing with Linux package only..."
-        macos_archive=""
-        arch_label=""
-    else
-        macos_binary="bin/gentility-agent-${current_version}-darwin-arm64"
-        echo "✅ macOS ARM64 binary built: ${macos_binary}"
-
-        # Create tar.gz archive for GitHub release (include config example)
-        echo "📦 Creating macOS ARM64 archive..."
-        mkdir -p packages
-        macos_archive="packages/gentility-agent-${current_version}-darwin-arm64.tar.gz"
-        tar -czf "${macos_archive}" \
-            -C bin "gentility-agent-${current_version}-darwin-arm64" \
-            -C .. gentility.yaml.example
-        arch_label="macOS ARM64 Binary (tar.gz)"
-        echo "✅ macOS ARM64 archive created: ${macos_archive}"
-    fi
-
-    echo ""
-    echo "🔐 Updating Homebrew formula SHA256 hashes..."
-    just update-formula-sha
-
-    echo ""
-    echo "📝 Committing formula changes to homebrew-agent repo..."
-    cd homebrew-agent && \
-        git add Formula/gentility-agent.rb && \
-        git commit -m "Update SHA256 hashes for v${current_version}" || echo "No formula changes to commit" && \
-        cd ..
-
-    # Verify the Linux AMD64 DEB package exists (should be built remotely)
-    linux_deb="packages/gentility-agent_${current_version}_amd64.deb"
-    if [ ! -f "$linux_deb" ]; then
-        echo "❌ Linux AMD64 DEB package not found: $linux_deb"
-        echo "Make sure 'just package-amd64' completed successfully"
-        exit 1
-    fi
-    echo "✅ Linux AMD64 DEB package found: ${linux_deb}"
-
-    # Check if release already exists and delete it
-    if gh release view "v${current_version}" >/dev/null 2>&1; then
-        echo "⚠️  Release v${current_version} already exists, deleting it..."
-        gh release delete "v${current_version}" --yes
-    fi
-
-    # Create GitHub release with assets
-    echo "🚀 Creating GitHub release..."
-    if [ -n "$macos_archive" ] && [ -f "$macos_archive" ]; then
-        gh release create "v${current_version}" \
-            --title "Release v${current_version}" \
-            --generate-notes \
-            "${linux_deb}#Linux AMD64 DEB Package" \
-            "${macos_archive}#${arch_label}"
-    else
-        gh release create "v${current_version}" \
-            --title "Release v${current_version}" \
-            --generate-notes \
-            "${linux_deb}#Linux AMD64 DEB Package"
-    fi
-
-    # Push homebrew-agent tap changes
-    echo ""
-    echo "📦 Pushing Homebrew tap to GitHub..."
-    cd homebrew-agent && \
-        git push origin master || echo "⚠️  Failed to push tap - may need to set up remote" && \
-        cd ..
-
-    echo ""
     echo "✅ Release v${current_version} completed successfully!"
     echo ""
     echo "📊 Release Summary:"
     echo "  Version: ${current_version}"
-    echo "  Package: {{binary_name}}_${current_version}_amd64.deb"
-    echo "  Repository: https://packages.gentility.ai/debian/"
-    echo "  GitHub Release: https://github.com/gentility-ai/gentility-agent/releases/tag/v${current_version}"
     echo "  Git tag: v${current_version}"
-    echo "  Homebrew formula updated"
+    echo "  GitHub Actions will build and publish the release artifacts"
 
 # Clean build artifacts
 clean:
@@ -558,12 +439,6 @@ version-bump type="patch":
         echo "  ✅ Updated Homebrew formula"
     fi
 
-    if [ -f "homebrew-agent/Formula/gentility-agent.rb" ]; then
-        sed -i '' "s/version \"$current_version\"/version \"$new_version\"/" homebrew-agent/Formula/gentility-agent.rb
-        sed -i '' "s/tag: \"v$current_version\"/tag: \"v$new_version\"/" homebrew-agent/Formula/gentility-agent.rb
-        echo "  ✅ Updated Homebrew tap formula"
-    fi
-
     # Update README if it contains version references
     sed -i '' "s/gentility-agent_${current_version}_/gentility-agent_${new_version}_/g" README.md 2>/dev/null || true
     sed -i '' "s/download/v${current_version}/download\/v${new_version}/g" README.md 2>/dev/null || true
@@ -572,47 +447,8 @@ version-bump type="patch":
     echo "✅ Version bumped to $new_version"
     echo ""
     echo "Next steps:"
-    echo "  1. Test the changes: just build-macos"
+    echo "  1. Review the staged version changes"
     echo "  2. Commit and tag: just release-commit"
-
-# Update Homebrew formula SHA256 hashes for built binaries
-update-formula-sha:
-    #!/bin/bash
-    set -e
-
-    current_version={{version}}
-    formula_path="homebrew-agent/Formula/gentility-agent.rb"
-
-    if [ ! -f "$formula_path" ]; then
-        echo "❌ Formula not found at $formula_path"
-        exit 1
-    fi
-
-    echo "📝 Updating Homebrew formula SHA256 hashes for v${current_version}..."
-
-    # Update macOS ARM64 SHA256 (line 10) - from tar.gz archive
-    darwin_arm64_archive="packages/{{binary_name}}-${current_version}-darwin-arm64.tar.gz"
-    if [ -f "$darwin_arm64_archive" ]; then
-        darwin_arm64_sha=$(shasum -a 256 "$darwin_arm64_archive" | cut -d' ' -f1)
-        echo "  ✅ macOS ARM64: $darwin_arm64_sha"
-        sed -i '' "10s/sha256 \".*\"/sha256 \"$darwin_arm64_sha\"/" "$formula_path"
-    else
-        echo "  ⚠️  macOS ARM64 archive not found, skipping"
-    fi
-
-    # Update Linux AMD64 SHA256 (line 27) - still from binary
-    linux_amd64_bin="{{bin_dir}}/{{binary_name}}-${current_version}-linux-amd64"
-    if [ -f "$linux_amd64_bin" ]; then
-        linux_amd64_sha=$(shasum -a 256 "$linux_amd64_bin" | cut -d' ' -f1)
-        echo "  ✅ Linux AMD64: $linux_amd64_sha"
-        sed -i '' "27s/sha256 \".*\"/sha256 \"$linux_amd64_sha\"/" "$formula_path"
-    else
-        echo "  ⚠️  Linux AMD64 binary not found, skipping"
-    fi
-
-    echo ""
-    echo "✅ Formula SHA256 hashes updated successfully"
-    echo "   Formula: $formula_path"
 
 # Commit and tag after version bump
 release-commit:
@@ -622,7 +458,7 @@ release-commit:
     current_version={{version}}
 
     # Stage all version-related files
-    git add VERSION nfpm.yaml nfpm-arm64.yaml Formula/gentility-agent.rb README.md homebrew-agent/Formula/gentility-agent.rb 2>/dev/null || true
+    git add VERSION nfpm.yaml nfpm-arm64.yaml Formula/gentility-agent.rb README.md 2>/dev/null || true
 
     # Commit
     git commit -m "Bump version to v${current_version}"

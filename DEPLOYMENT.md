@@ -5,7 +5,7 @@ This repo still supports package publishing, but the current surface is narrower
 ## Current Deployment Surfaces
 
 1. GitHub Actions builds release artifacts from `.github/workflows/build.yml`.
-2. `just release` is the local full-release workflow.
+2. `just release` is the local version/tag workflow.
 3. `aptly` plus `nfpm` powers the local package repository flow.
 4. `ansible/` contains the remaining package-server helpers.
 
@@ -19,17 +19,18 @@ This repo still supports package publishing, but the current surface is narrower
   - `GPG_KEY_ID`
   - `DO_ACCESS_KEY`
   - `DO_SECRET_KEY`
-  - `CORE7_IP`
-  - `CORE7_USER`
 
 ## Local Package Repository Flow
+
+GitHub Actions is now the build source for release artifacts. Start by downloading the `.deb` file you want to publish into `./packages/`.
 
 ```bash
 just install-tools
 just repo-init
 just repo-create
-just package-amd64
 just repo-add-amd64
+# or:
+just repo-add-package packages/gentility-agent_<version>_amd64.deb
 just repo-publish-local
 just test-repo
 just validate-package
@@ -83,6 +84,8 @@ For the local tagged release path:
 ```bash
 just release
 ```
+
+That workflow bumps the version, commits, creates the tag, and pushes it. GitHub Actions then builds and publishes the release artifacts for that tag.
 
 ## User Installation
 
