@@ -26,7 +26,7 @@ build: install-deps
         crystal build src/agent.cr --release --static --no-debug -o {{bin_dir}}/{{binary_name}}; \
     else \
         echo "WARNING: Building on macOS - binary will be for native architecture"; \
-        echo "For Linux deployment, use 'just build-linux-amd64' instead"; \
+        echo "For Linux deployment, use 'just build-remote-amd64' instead"; \
         crystal build src/agent.cr --release --no-debug -o {{bin_dir}}/{{binary_name}}; \
     fi
     @echo "Binary built: {{bin_dir}}/{{binary_name}}"
@@ -498,33 +498,6 @@ release type="patch":
     echo "  Git tag: v${current_version}"
     echo "  Homebrew formula updated"
 
-# Legacy S3 release workflow
-release-s3 type="patch":
-    #!/bin/bash
-    set -e
-    echo "🚀 Starting automated S3 release workflow..."
-    just version-update {{type}}
-    echo ""
-    echo "📦 Building and packaging..."
-    just package-amd64
-    echo ""
-    echo "📤 Updating repository..."
-    just repo-update-s3
-    echo ""
-    
-    # Get current version after update
-    current_version=$(cat .version-lock.json | jq -r '.current_version')
-    echo "✅ Release v${current_version} completed successfully!"
-    echo ""
-    echo "📊 Release Summary:"
-    echo "  Version: ${current_version}"
-    echo "  Package: {{binary_name}}_${current_version}_amd64.deb"
-    echo "  Repository: https://gentility.sgp1.digitaloceanspaces.com/debian/"
-
-# Legacy release command (renamed to avoid conflict)
-release-legacy repo_name="gentility-main" distribution="stable": package (repo-update repo_name distribution)
-    @echo "Full release completed!"
-
 # Clean build artifacts
 clean:
     @echo "Cleaning build artifacts..."
@@ -649,7 +622,7 @@ release-commit:
     current_version={{version}}
 
     # Stage all version-related files
-    git add VERSION nfpm.yaml Formula/gentility-agent.rb README.md homebrew-agent/Formula/gentility-agent.rb 2>/dev/null || true
+    git add VERSION nfpm.yaml nfpm-arm64.yaml Formula/gentility-agent.rb README.md homebrew-agent/Formula/gentility-agent.rb 2>/dev/null || true
 
     # Commit
     git commit -m "Bump version to v${current_version}"
@@ -660,29 +633,6 @@ release-commit:
     echo "✅ Committed and tagged v${current_version}"
     echo ""
     echo "To push: git push origin master --tags"
-
-# OLD: Force version bump (manual override)
-old-version-bump type="patch":
-    @echo "Manually bumping version ({{type}})..."
-    @current_version={{version}}; \
-    IFS='.' read -r major minor patch <<< "$current_version"; \
-    if [ "{{type}}" = "major" ]; then \
-        new_version="$((major + 1)).0.0"; \
-    elif [ "{{type}}" = "minor" ]; then \
-        new_version="$major.$((minor + 1)).0"; \
-    else \
-        new_version="$major.$minor.$((patch + 1))"; \
-    fi; \
-    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ"); \
-    echo "  📝 Updating version from $current_version to $new_version"; \
-    sed -i '' "s/VERSION = \"$current_version\"/VERSION = \"$new_version\"/" src/agent.cr; \
-    sed -i '' "s/version: \"$current_version\"/version: \"$new_version\"/" nfpm.yaml nfpm-arm64.yaml 2>/dev/null || true; \
-    old_entry=$(cat .version-lock.json 2>/dev/null | jq -c '{version: .current_version, hash: .source_hash, timestamp: .last_updated}' 2>/dev/null || echo '{}'); \
-    new_hash=$(grep -v 'VERSION = ' src/agent.cr | shasum -a 256 | cut -d' ' -f1); \
-    cat .version-lock.json 2>/dev/null | jq --arg version "$new_version" --arg hash "$new_hash" --arg timestamp "$timestamp" --argjson old "$old_entry" \
-        '.current_version = $version | .source_hash = $hash | .last_updated = $timestamp | .history = ((.history // []) + [$old])[-10:]' > .version-lock.json.tmp && mv .version-lock.json.tmp .version-lock.json || \
-    echo "{\"current_version\": \"$new_version\", \"source_hash\": \"$new_hash\", \"last_updated\": \"$timestamp\", \"history\": []}" | jq . > .version-lock.json; \
-    echo "  ✅ Version bumped to $new_version"
 
 # Show build information
 info:
