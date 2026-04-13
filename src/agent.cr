@@ -44,6 +44,7 @@ require "./agent/config"
 require "./agent/database"
 require "./agent/cli"
 require "./agent/websocket_connector"
+require "./agent/websocket_writer"
 
 # Read version from VERSION file at compile time
 VERSION = {{ read_file("VERSION").strip }}
