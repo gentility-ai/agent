@@ -6,7 +6,7 @@ class AgentEgressDialer
 
   alias Result = Success | Failure
 
-  def initialize(@allow_loopback : Bool = false, @allow_private_networks : Bool = true)
+  def initialize(@allow_loopback : Bool = false, @allow_private_networks : Bool = false)
   end
 
   def connect(host : String, port : Int32, timeout : Time::Span) : Result

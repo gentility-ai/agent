@@ -125,6 +125,19 @@ describe AgentEgressDialer do
 
   # Conditional private-network gating + IPv6 coverage + v6-mapped-v4 unmap.
 
+  it "blocks RFC1918 by default (allow_private_networks defaults to false)" do
+    # Locks in the default-deny posture: a Dialer constructed without any
+    # arguments must refuse private network destinations. The agent's
+    # egress config has to opt in explicitly.
+    dialer = AgentEgressDialer.new
+    result = dialer.connect("10.0.0.1", 80, 300.milliseconds)
+
+    result.should be_a(AgentEgressDialer::Failure)
+    failure = result.as(AgentEgressDialer::Failure)
+    failure.code.should eq("connect_failed")
+    failure.message.should contain("blocked")
+  end
+
   it "blocks RFC1918 10/8 when allow_private_networks is false" do
     dialer = AgentEgressDialer.new(allow_private_networks: false)
     result = dialer.connect("10.0.0.1", 80, 300.milliseconds)

@@ -79,6 +79,14 @@ class GentilityAgent
   @x25519_public_key : Bytes?
   @x25519_shared_secret : Bytes?
 
+  # Egress tunnel configuration. Off by default — the agent ignores
+  # egress.stream.* frames and reports egress_disabled unless an operator
+  # opts in via the egress section of gentility.yaml.
+  @egress_enabled : Bool = false
+  @egress_allow_loopback : Bool = false
+  @egress_allow_private_networks : Bool = false
+  @egress_manager : AgentEgressManager?
+
   def initialize(access_key : String, @server_url : String, @nickname : String, @environment : String = "prod")
     # Determine if this is a machine_key or oauth_token based on prefix
     if access_key.starts_with?("genkey-agent-")
@@ -97,6 +105,7 @@ class GentilityAgent
 
     load_security_config
     load_x25519_keys
+    load_egress_config
   end
 
   private def load_x25519_keys
@@ -182,6 +191,34 @@ class GentilityAgent
     if locked_out
       lockout_until = lockout_until_ts ? Time.unix(lockout_until_ts.to_i64) : nil
       Security.restore_lockout(lockout_until)
+    end
+  end
+
+  # Read the egress: section from gentility.yaml.
+  #
+  # Example config:
+  #   egress:
+  #     enabled: false                # must be true to accept egress frames
+  #     allow_loopback: false         # 127.0.0.0/8, ::1
+  #     allow_private_networks: false # RFC1918, CGNAT, ULA
+  #
+  # All three keys default to false. The dialer also defaults to
+  # deny-by-default, so a missing or malformed section leaves egress off.
+  private def load_egress_config
+    config_file = AgentConfig.get_config_path
+    config = AgentConfig.load_config_from_file(config_file)
+    return unless config
+
+    egress_any = config["egress"]?
+    egress = egress_any.try(&.as_h?)
+    return unless egress
+
+    @egress_enabled = egress[YAML::Any.new("enabled")]?.try(&.as_bool?) || false
+    @egress_allow_loopback = egress[YAML::Any.new("allow_loopback")]?.try(&.as_bool?) || false
+    @egress_allow_private_networks = egress[YAML::Any.new("allow_private_networks")]?.try(&.as_bool?) || false
+
+    if @egress_enabled
+      Log.info { "Egress enabled (loopback=#{@egress_allow_loopback}, private=#{@egress_allow_private_networks})" }
     end
   end
 
@@ -451,6 +488,7 @@ class GentilityAgent
 
     @websocket = websocket
     @writer = AgentWebSocketWriter.new(websocket)
+    @egress_manager = build_egress_manager if @egress_enabled
 
     # Note: HTTP::WebSocket doesn't have on_error callback
     # Errors will be handled in the rescue blocks
@@ -567,10 +605,78 @@ class GentilityAgent
       end
     when "command.request"
       handle_command(msg)
+    when "egress.stream.open"
+      handle_egress_open(msg)
+    when "egress.stream.data"
+      handle_egress_data(msg)
+    when "egress.stream.close"
+      handle_egress_close(msg)
     else
       Log.warn { "Unknown message type: #{msg["type"]?}" }
       Log.debug { "Full message: #{msg}" }
     end
+  end
+
+  private def handle_egress_open(msg : JSON::Any)
+    return unless (manager = require_egress(msg))
+    stream_id = msg["stream_id"]?.try(&.as_s?)
+    host = msg["host"]?.try(&.as_s?)
+    port = msg["port"]?.try(&.as_i?)
+    timeout_ms = msg["connect_timeout_ms"]?.try(&.as_i?) || 5000
+
+    unless stream_id && host && port
+      send_egress_error(stream_id || "", "invalid_request", "egress.stream.open missing stream_id/host/port")
+      return
+    end
+
+    manager.open_stream(stream_id, host, port, timeout_ms)
+  end
+
+  private def handle_egress_data(msg : JSON::Any)
+    return unless (manager = require_egress(msg))
+    stream_id = msg["stream_id"]?.try(&.as_s?)
+    payload_b64 = msg["payload_b64"]?.try(&.as_s?)
+
+    unless stream_id && payload_b64
+      send_egress_error(stream_id || "", "invalid_request", "egress.stream.data missing stream_id/payload_b64")
+      return
+    end
+
+    manager.handle_data(stream_id, payload_b64)
+  end
+
+  private def handle_egress_close(msg : JSON::Any)
+    return unless (manager = require_egress(msg))
+    stream_id = msg["stream_id"]?.try(&.as_s?)
+    reason = msg["reason"]?.try(&.as_s?)
+
+    unless stream_id
+      send_egress_error("", "invalid_request", "egress.stream.close missing stream_id")
+      return
+    end
+
+    manager.handle_close(stream_id, reason)
+  end
+
+  # Gate egress dispatch. Returns the active manager, or nil after sending
+  # an egress_disabled error back to the server.
+  private def require_egress(msg : JSON::Any) : AgentEgressManager?
+    manager = @egress_manager
+    return manager if manager
+
+    stream_id = msg["stream_id"]?.try(&.as_s?) || ""
+    send_egress_error(stream_id, "egress_disabled", "agent egress is not enabled")
+    nil
+  end
+
+  private def send_egress_error(stream_id : String, code : String, message : String)
+    send_message({
+      "type"      => "egress.stream.error",
+      "v"         => 3,
+      "stream_id" => stream_id,
+      "code"      => code,
+      "message"   => message,
+    })
   end
 
   private def handle_command(msg : JSON::Any)
@@ -1338,9 +1444,30 @@ class GentilityAgent
   end
 
   private def teardown_connection
+    @egress_manager.try(&.close_all)
+    @egress_manager = nil
     @writer.try(&.close)
     @writer = nil
     @websocket = nil
+  end
+
+  # Construct an egress manager wired to the current websocket writer.
+  # The send_frame closure reads @writer lazily so frames produced after
+  # teardown_connection drop silently instead of raising.
+  private def build_egress_manager : AgentEgressManager
+    send_frame = ->(json : String) {
+      writer = @writer
+      if writer
+        Log.debug { "→ Sending egress frame (#{json.size} bytes)" }
+        writer.send(json)
+      end
+      nil
+    }
+    dialer = AgentEgressDialer.new(
+      allow_loopback: @egress_allow_loopback,
+      allow_private_networks: @egress_allow_private_networks,
+    )
+    AgentEgressManager.new(send_frame: send_frame, dialer: dialer)
   end
 
   # Helper method to send a message as JSON
