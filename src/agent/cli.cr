@@ -545,10 +545,10 @@ class AgentProvisioner
     # Connect to WebSocket
     connect_websocket
 
-    # Wait for provisioning_welcome
+    # Wait for session.provisioning.created
     msg = wait_for_message(10.seconds)
-    unless msg["type"]?.try(&.to_s) == "provisioning_welcome"
-      raise "Expected provisioning_welcome, got: #{msg["type"]?}"
+    unless msg["type"]?.try(&.to_s) == "session.provisioning.created"
+      raise "Expected session.provisioning.created, got: #{msg["type"]?}"
     end
 
     puts "📋 Starting agent provisioning..."
@@ -561,7 +561,7 @@ class AgentProvisioner
 
     loop do
       # Build provision request
-      request = {"type" => "provision_request", "v" => 1} of String => (String | Int32)
+      request = {"type" => "session.provision", "v" => 2} of String => (String | Int32)
       request["organization_id"] = selected_org_id if selected_org_id
       request["environment"] = selected_env if selected_env
       request["nickname"] = selected_nickname if selected_nickname
@@ -573,7 +573,7 @@ class AgentProvisioner
       response = wait_for_message(30.seconds)
 
       case response["type"]?.try(&.to_s)
-      when "provision_incomplete"
+      when "session.provisioning.incomplete"
         missing = response["missing"]?.try(&.to_s)
         options = response["options"]?.try(&.as_a?)
 
@@ -587,10 +587,10 @@ class AgentProvisioner
         else
           raise "Unknown missing field: #{missing}"
         end
-      when "provision_complete"
+      when "session.provisioned"
         # Success! Save machine key
         machine_key = response["machine_key"]?.try(&.to_s)
-        raise "No machine_key in provision_complete" unless machine_key
+        raise "No machine_key in session.provisioned" unless machine_key
 
         server_target_id = response["server_target_id"]?.try(&.to_s)
         org_id = response["organization_id"]?.try(&.to_s)
@@ -638,7 +638,8 @@ class AgentProvisioner
       path: "/agent/websocket",
       query: URI::Params.build do |params|
         params.add "oauth_token", @oauth_token
-        params.add "version", VERSION
+        params.add "version", "2"
+        params.add "agent_version", VERSION
       end
     )
 
@@ -1630,15 +1631,9 @@ def handle_sudo_command(action : String, args : Array(String))
     end
     exit status.exit_code
   when "status"
-    if is_root
-      status = Process.run(manage_sudo, ["status"],
-        output: Process::Redirect::Inherit,
-        error: Process::Redirect::Inherit)
-    else
-      status = Process.run("sudo", [manage_sudo, "status"],
-        output: Process::Redirect::Inherit,
-        error: Process::Redirect::Inherit)
-    end
+    status = Process.run(manage_sudo, ["status"],
+      output: Process::Redirect::Inherit,
+      error: Process::Redirect::Inherit)
     exit status.exit_code
   end
 end

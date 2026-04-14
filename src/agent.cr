@@ -257,7 +257,7 @@ class GentilityAgent
 
   private def send_lockout_notification
     # SERVER INTEGRATION NOTE:
-    # When the agent enters lockout state, it sends a security_lockout message.
+    # When the agent enters lockout state, it sends an agent.security.lockout message.
     # The server should:
     # 1. Display warning in UI: "Agent locked due to failed auth attempts"
     # 2. For temporary lockout: show "locked_until" timestamp to user
@@ -266,7 +266,7 @@ class GentilityAgent
     # 5. Display lockout status in agent status view
 
     lockout_msg = {
-      "type"            => "security_lockout",
+      "type"            => "agent.security.lockout",
       "lockout_mode"    => Security.lockout_mode,
       "failed_attempts" => Security.failed_attempt_count,
       "timestamp"       => Time.utc.to_unix_f,
@@ -415,7 +415,8 @@ class GentilityAgent
           # OAuth mode: send OAuth token
           params.add "oauth_token", @oauth_token.not_nil!
         end
-        params.add "version", VERSION
+        params.add "version", "2"
+        params.add "agent_version", VERSION
         params.add "security_mode", Security.mode
         params.add "security_enabled", (Security.mode != "none").to_s
         params.add "security_active", Security.unlocked?.to_s
@@ -490,7 +491,7 @@ class GentilityAgent
 
   private def handle_parsed_message(msg : JSON::Any)
     case msg["type"]?.try(&.to_s)
-    when "welcome"
+    when "session.created"
       Log.info { "Server accepted connection" }
       machine_id = msg["machine_id"]?.try(&.to_s)
       Log.info { "Machine ID: #{machine_id}" } if machine_id
@@ -529,7 +530,7 @@ class GentilityAgent
       # Advertise available credentials to server
       advertise_credentials
     when "error"
-      # Handle error messages from server
+      # Handle connection-level error messages from server
       error_code = msg["error"]?.try(&.to_s)
       error_message = msg["message"]?.try(&.to_s) || "Unknown error"
 
@@ -547,13 +548,13 @@ class GentilityAgent
         Log.error { "Error code: #{error_code}" } if error_code
         exit 1
       end
-    when "ping"
+    when "heartbeat.ping"
       # Respond to ping with security status
       Log.debug { "Received ping, sending pong" }
-      response = {"type" => "pong", "timestamp" => Time.utc.to_unix_f}
+      response = {"type" => "heartbeat.pong", "timestamp" => Time.utc.to_unix_f}
       response = response.merge(Security.status)
       send_message(response)
-    when "pong"
+    when "heartbeat.pong"
       # Handle pong response (server responding to our ping)
       @last_pong_received = Time.instant
       @ping_in_flight = false
@@ -564,7 +565,7 @@ class GentilityAgent
       else
         Log.debug { "Received pong" }
       end
-    when "command"
+    when "command.request"
       handle_command(msg)
     else
       Log.warn { "Unknown message type: #{msg["type"]?}" }
@@ -1167,7 +1168,7 @@ class GentilityAgent
 
   private def send_response(request_id : String, result)
     send_message({
-      "type"       => "response",
+      "type"       => "command.response",
       "request_id" => request_id,
       "result"     => result,
     })
@@ -1175,7 +1176,7 @@ class GentilityAgent
 
   private def send_error(request_id : String, error : String)
     send_message({
-      "type"       => "error",
+      "type"       => "command.error",
       "request_id" => request_id,
       "error"      => error,
     })
@@ -1197,7 +1198,7 @@ class GentilityAgent
     status = status.merge(Security.status)
 
     send_message({
-      "type"   => "status",
+      "type"   => "agent.status",
       "status" => status,
     })
   rescue ex : Exception
@@ -1294,7 +1295,7 @@ class GentilityAgent
 
           @last_ping_sent = Time.instant
           @ping_in_flight = true
-          send_message({"type" => "ping", "timestamp" => Time.utc.to_unix_f})
+          send_message({"type" => "heartbeat.ping", "timestamp" => Time.utc.to_unix_f})
           Log.debug { "Sent ping" }
         end
       rescue ex : Exception
@@ -1371,7 +1372,7 @@ class GentilityAgent
     end
 
     send_message({
-      "type"        => "credentials_available",
+      "type"        => "agent.credentials",
       "credentials" => credential_list,
     })
   rescue ex : Exception
