@@ -48,6 +48,15 @@ fetch-release:
     echo "✅ Downloaded release artifacts for ${tag}:"
     ls -lh "packages/{{binary_name}}"*"${current_version}"* 2>/dev/null || true
 
+# Chains fetch-release -> repo-add-all -> deploy-packages. Refreshes
+# CI artifacts, adds every arch to the aptly repo, rsyncs ./public/ to
+# packages.gentility.ai via ansible, and reloads nginx. Expects the
+# GitHub Release to already exist and SSH access to the packages server.
+# End-to-end publish of the current VERSION to packages.gentility.ai
+publish: fetch-release repo-add-all deploy-packages
+    @echo ""
+    @echo "✅ v{{version}} published to https://packages.gentility.ai"
+
 # Add specific package to aptly repository
 repo-add-package package_file repo_name="gentility-main":
     @echo "Adding {{package_file}} to aptly repository '{{repo_name}}'..."
@@ -329,14 +338,14 @@ release type="patch":
     just fetch-release
 
     echo ""
-    echo "✅ Release v${current_version} completed successfully!"
+    echo "✅ Release v${current_version} built and fetched."
     echo ""
     echo "📊 Release Summary:"
     echo "  Version: ${current_version}"
     echo "  Git tag: v${current_version}"
     echo "  Artifacts: ./packages/"
     echo ""
-    echo "Next step: publish to the apt repo with 'just repo-update-s3'"
+    echo "Next step: 'just publish' to deploy to packages.gentility.ai"
 
 # Clean build artifacts
 clean:
