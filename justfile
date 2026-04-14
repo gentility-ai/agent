@@ -85,10 +85,10 @@ repo-add-all repo_name="gentility-main":
         exit 1; \
     fi
     @for pkg in packages/{{binary_name}}_{{version}}_*.deb; do \
-        if [ -f "$$pkg" ]; then \
-            echo "Adding $$pkg..." && \
-            aptly -config=configs/aptly.conf repo add {{repo_name}} $$pkg; \
-        fi \
+        if [ -f "$pkg" ]; then \
+            echo "Adding $pkg..." && \
+            aptly -config=configs/aptly.conf repo add {{repo_name}} "$pkg"; \
+        fi; \
     done
     @echo "All packages added to repository"
 
