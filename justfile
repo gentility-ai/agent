@@ -18,111 +18,35 @@ install-deps:
     @echo "Installing Crystal dependencies..."
     shards install
 
-# Build the Crystal binary for Linux (static when possible)
-build: install-deps
-    @echo "Building {{binary_name}} v{{version}} for {{arch}}..."
-    @mkdir -p {{bin_dir}}
-    @if [ "$(uname)" = "Linux" ]; then \
-        crystal build src/agent.cr --release --static --no-debug -o {{bin_dir}}/{{binary_name}}; \
-    else \
-        echo "WARNING: Building on macOS - binary will be for native architecture"; \
-        crystal build src/agent.cr --release --no-debug -o {{bin_dir}}/{{binary_name}}; \
-    fi
-    @echo "Binary built: {{bin_dir}}/{{binary_name}}"
-
-# Build for current platform (development)
+# Release binaries (Linux amd64/arm64, macOS arm64) are built by the
+# GitHub Actions workflow on tag push — see `just release`. This
+# recipe is for local iteration only.
+# Build a development binary for the current platform
 build-dev: install-deps
     @echo "Building {{binary_name}} v{{version}} for development..."
     @mkdir -p {{bin_dir}}
     crystal build src/agent.cr -o {{bin_dir}}/{{binary_name}}
     @echo "Development binary built: {{bin_dir}}/{{binary_name}}"
 
-# Build for macOS (detects current architecture)
-build-macos: install-deps
-    @echo "Building {{binary_name}} v{{version}} for macOS..."
-    @mkdir -p {{bin_dir}}
-    @arch=$(uname -m); \
-    if [ "$$arch" = "arm64" ]; then \
-        echo "Building for Apple Silicon (ARM64)..."; \
-        crystal build src/agent.cr --release --no-debug -o {{bin_dir}}/{{binary_name}}-{{version}}-darwin-arm64; \
-        echo "macOS ARM64 binary built: {{bin_dir}}/{{binary_name}}-{{version}}-darwin-arm64"; \
-    else \
-        echo "Building for Intel (x86_64)..."; \
-        crystal build src/agent.cr --release --no-debug -o {{bin_dir}}/{{binary_name}}-{{version}}-darwin-x86_64; \
-        echo "macOS x86_64 binary built: {{bin_dir}}/{{binary_name}}-{{version}}-darwin-x86_64"; \
+# CI publishes .deb (amd64/arm64), .rpm (x86_64/aarch64), and .tar.gz
+# (linux amd64/arm64, darwin arm64) on every v* tag.
+# Download the GitHub Actions release artifacts for the current VERSION into ./packages
+fetch-release:
+    #!/bin/bash
+    set -e
+    current_version=$(cat VERSION)
+    tag="v${current_version}"
+    echo "📥 Fetching release artifacts for ${tag} from GitHub..."
+    mkdir -p packages
+    if ! gh release view "${tag}" >/dev/null 2>&1; then
+        echo "❌ Release ${tag} does not exist yet."
+        echo "   Tag it with 'just release' and wait for the Build workflow to finish."
+        exit 1
     fi
-
-# Build locally for ARM64 (Mac M1) - Note: This will be Darwin ARM64, not Linux ARM64
-build-local-arm64: install-deps
-    @echo "Building {{binary_name}} v{{version}} locally for Darwin ARM64..."
-    @mkdir -p {{bin_dir}}
-    crystal build src/agent.cr --release --no-debug -o {{bin_dir}}/{{binary_name}}-{{version}}-darwin-arm64
-    @echo "Darwin ARM64 binary built: {{bin_dir}}/{{binary_name}}-{{version}}-darwin-arm64"
-
-# Build locally for Intel macOS
-build-local-x86_64: install-deps
-    @echo "Building {{binary_name}} v{{version}} locally for Darwin x86_64..."
-    @mkdir -p {{bin_dir}}
-    crystal build src/agent.cr --release --no-debug -o {{bin_dir}}/{{binary_name}}-{{version}}-darwin-x86_64
-    @echo "Darwin x86_64 binary built: {{bin_dir}}/{{binary_name}}-{{version}}-darwin-x86_64"
-
-# Create macOS release archive (for Homebrew and GitHub releases)
-package-macos: build-macos
-    @echo "Creating macOS release archive..."
-    @mkdir -p packages
-    @arch=$(uname -m); \
-    if [ "$$arch" = "arm64" ]; then \
-        binary_name="{{binary_name}}-{{version}}-darwin-arm64"; \
-        archive_name="{{binary_name}}-{{version}}-darwin-arm64.tar.gz"; \
-    else \
-        binary_name="{{binary_name}}-{{version}}-darwin-x86_64"; \
-        archive_name="{{binary_name}}-{{version}}-darwin-x86_64.tar.gz"; \
-    fi; \
-    tar -czf packages/$$archive_name -C {{bin_dir}} $$binary_name gentility.yaml.example; \
-    echo "✅ macOS archive created: packages/$$archive_name"
-
-# Create DEB package for AMD64 using an existing binary in ./bin
-package-amd64:
-    @echo "Creating DEB package for AMD64..."
-    @mkdir -p packages
-    @if [ ! -f "{{bin_dir}}/{{binary_name}}" ]; then \
-        echo "Error: {{bin_dir}}/{{binary_name}} not found."; \
-        echo "This justfile no longer builds release binaries."; \
-        echo "Use a prebuilt GitHub artifact or place the release binary at {{bin_dir}}/{{binary_name}}."; \
-        exit 1; \
-    fi
-    @if [ -f "packages/{{binary_name}}_{{version}}_amd64.deb" ]; then \
-        echo "⚠️  Package packages/{{binary_name}}_{{version}}_amd64.deb already exists!"; \
-        echo "Removing existing package to rebuild with latest changes..."; \
-        rm -f packages/{{binary_name}}_{{version}}_amd64.deb; \
-    fi
-    nfpm pkg --packager deb --config nfpm.yaml --target packages/{{binary_name}}_{{version}}_amd64.deb
-    @echo "✅ DEB package created: packages/{{binary_name}}_{{version}}_amd64.deb"
-
-# Create DEB package for ARM64 using an existing binary in ./bin
-package-arm64:
-    @echo "Creating DEB package for ARM64..."
-    @mkdir -p packages
-    @if [ ! -f "{{bin_dir}}/{{binary_name}}" ]; then \
-        echo "Error: {{bin_dir}}/{{binary_name}} not found."; \
-        echo "This justfile no longer builds release binaries."; \
-        echo "Use a prebuilt GitHub artifact or place the release binary at {{bin_dir}}/{{binary_name}}."; \
-        exit 1; \
-    fi
-    @if [ -f "packages/{{binary_name}}_{{version}}_arm64.deb" ]; then \
-        echo "⚠️  Package packages/{{binary_name}}_{{version}}_arm64.deb already exists!"; \
-        echo "Removing existing package to rebuild with latest changes..."; \
-        rm -f packages/{{binary_name}}_{{version}}_arm64.deb; \
-    fi
-    nfpm pkg --packager deb --config nfpm-arm64.yaml --target packages/{{binary_name}}_{{version}}_arm64.deb
-    @echo "✅ DEB package created: packages/{{binary_name}}_{{version}}_arm64.deb"
-
-# Package all architectures
-package-all: package-amd64
-    @echo "All available packages created"
-
-# Legacy package command (defaults to AMD64)
-package: package-amd64
+    gh release download "${tag}" --dir packages --clobber
+    echo ""
+    echo "✅ Downloaded release artifacts for ${tag}:"
+    ls -lh "packages/{{binary_name}}"*"${current_version}"* 2>/dev/null || true
 
 # Add specific package to aptly repository
 repo-add-package package_file repo_name="gentility-main":
@@ -135,15 +59,22 @@ repo-add-amd64 repo_name="gentility-main":
     @echo "Adding AMD64 package to aptly repository '{{repo_name}}'..."
     @if [ ! -f "packages/{{binary_name}}_{{version}}_amd64.deb" ]; then \
         echo "Error: packages/{{binary_name}}_{{version}}_amd64.deb not found."; \
-        echo "Download the GitHub-built package first, or run 'just package-amd64' with a prebuilt binary in {{bin_dir}}/{{binary_name}}."; \
+        echo "Run 'just fetch-release' to download the CI-built package from GitHub."; \
         exit 1; \
     fi
     aptly -config=configs/aptly.conf repo add {{repo_name}} packages/{{binary_name}}_{{version}}_amd64.deb
     @echo "AMD64 package added to repository"
 
-# Add all available packages to repository
-repo-add-all repo_name="gentility-main": package-all
+# Expects packages/ to already contain the artifacts fetched from GitHub
+# via `just fetch-release`.
+# Add all deb packages for the current version to the aptly repository
+repo-add-all repo_name="gentility-main":
     @echo "Adding all packages to repository..."
+    @if ! ls packages/{{binary_name}}_{{version}}_*.deb >/dev/null 2>&1; then \
+        echo "Error: no packages/{{binary_name}}_{{version}}_*.deb found."; \
+        echo "Run 'just fetch-release' to download the CI-built packages from GitHub."; \
+        exit 1; \
+    fi
     @for pkg in packages/{{binary_name}}_{{version}}_*.deb; do \
         if [ -f "$$pkg" ]; then \
             echo "Adding $$pkg..." && \
@@ -166,7 +97,7 @@ repo-update repo_name="gentility-main" distribution="stable":
     @echo "Updating repository with new package..."
     @if [ ! -f "{{deb_file}}" ]; then \
         echo "Error: {{deb_file}} not found."; \
-        echo "Download the GitHub-built package first, or add one under ./packages."; \
+        echo "Run 'just fetch-release' to download the CI-built package from GitHub."; \
         exit 1; \
     fi
     aptly -config=configs/aptly.conf repo add {{repo_name}} {{deb_file}}
@@ -237,7 +168,7 @@ repo-update-local repo_name="gentility-main" distribution="stable":
     @echo "Updating local repository with new package..."
     @if [ ! -f "{{deb_file}}" ]; then \
         echo "Error: {{deb_file}} not found."; \
-        echo "Download the GitHub-built package first, or add one under ./packages."; \
+        echo "Run 'just fetch-release' to download the CI-built package from GitHub."; \
         exit 1; \
     fi
     aptly -config=configs/aptly.conf repo add {{repo_name}} {{deb_file}}
@@ -372,19 +303,46 @@ release type="patch":
     git push origin master --tags
 
     echo ""
+    echo "⏳ Waiting for GitHub Actions to register the workflow run..."
+    sleep 5
+
+    run_id=$(gh run list \
+        --workflow=build.yml \
+        --event=push \
+        --branch="v${current_version}" \
+        --limit=1 \
+        --json databaseId \
+        --jq '.[0].databaseId')
+
+    if [ -z "$run_id" ]; then
+        echo "⚠️  Could not find a workflow run for tag v${current_version}."
+        echo "   Check https://github.com/$(gh repo view --json nameWithOwner -q .nameWithOwner)/actions"
+        echo "   and run 'just fetch-release' once the build finishes."
+        exit 1
+    fi
+
+    echo "👀 Watching workflow run ${run_id}..."
+    gh run watch "$run_id" --exit-status
+
+    echo ""
+    echo "📥 Fetching release artifacts..."
+    just fetch-release
+
+    echo ""
     echo "✅ Release v${current_version} completed successfully!"
     echo ""
     echo "📊 Release Summary:"
     echo "  Version: ${current_version}"
     echo "  Git tag: v${current_version}"
-    echo "  GitHub Actions will build and publish the release artifacts"
+    echo "  Artifacts: ./packages/"
+    echo ""
+    echo "Next step: publish to the apt repo with 'just repo-update-s3'"
 
 # Clean build artifacts
 clean:
     @echo "Cleaning build artifacts..."
     rm -rf {{bin_dir}}
     rm -rf packages
-    rm -f *.rpm
 
 # Run tests (if any exist)
 test:
@@ -396,12 +354,16 @@ run-dev: build-dev
     @echo "Running development binary..."
     ./{{bin_dir}}/{{binary_name}} --debug
 
-# Install required tools
+# Release binaries are built by GitHub Actions, so nfpm is no longer
+# required locally — only crystal (dev), aptly (repo publishing), and
+# gh (downloading release artifacts).
+# Check that the tools this justfile needs are available
 install-tools:
-    @echo "Checking and installing required tools..."
+    @echo "Checking required tools..."
     @which crystal >/dev/null || (echo "Please install Crystal first: https://crystal-lang.org/install/"; exit 1)
-    @which nfpm >/dev/null || (echo "Installing nfpm..." && curl -sfL https://install.goreleaser.com/github.com/goreleaser/nfpm.sh | sh -s -- -b ~/.local/bin)
-    @which aptly >/dev/null || (echo "Please install aptly: apt-get install aptly"; exit 1)
+    @which aptly >/dev/null || (echo "Please install aptly: brew install aptly  (or apt-get install aptly)"; exit 1)
+    @which gh >/dev/null || (echo "Please install the GitHub CLI: https://cli.github.com/"; exit 1)
+    @echo "✅ All required tools are available"
 
 # Show current version
 version:
