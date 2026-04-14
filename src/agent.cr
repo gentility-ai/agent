@@ -53,6 +53,7 @@ class GentilityAgent
   Log = ::Log.for(self)
 
   @websocket : HTTP::WebSocket?
+  @writer : AgentWebSocketWriter?
   @machine_key : String? # Ed25519 private key (if provisioned)
   @oauth_token : String? # OAuth access token (if using OAuth)
   @server_url : String
@@ -315,7 +316,7 @@ class GentilityAgent
             Log.warn { "Connection dead: no pong received in #{time_since_pong.total_seconds.round(0).to_i}s" }
             # Don't call close() - it writes to the socket and will block forever
             # on a half-open TCP connection. Just abandon it.
-            @websocket = nil
+            teardown_connection
             break
           end
         end
@@ -376,7 +377,7 @@ class GentilityAgent
 
     # The ping fiber will stop naturally when @running becomes false
 
-    # Close WebSocket
+    @writer.try(&.close)
     @websocket.try(&.close)
   end
 
@@ -393,7 +394,7 @@ class GentilityAgent
   private def connect
     # Clean up any existing connection
     @websocket.try(&.close) if @websocket
-    @websocket = nil
+    teardown_connection
     @ping_fiber = nil
 
     # Parse server URL and create WebSocket URL
@@ -441,10 +442,11 @@ class GentilityAgent
       unless @graceful_shutdown
         Log.warn { "WebSocket closed: #{close_code} - #{message}" }
       end
-      @websocket = nil if current_websocket?(websocket)
+      teardown_connection if current_websocket?(websocket)
     end
 
     @websocket = websocket
+    @writer = AgentWebSocketWriter.new(websocket)
 
     # Note: HTTP::WebSocket doesn't have on_error callback
     # Errors will be handled in the rescue blocks
@@ -1278,7 +1280,7 @@ class GentilityAgent
             if time_since_ping > PONG_TIMEOUT
               Log.warn { "Pong timeout: no response in #{time_since_ping.total_seconds.round(1)}s - connection presumed dead" }
               # Don't call close() - blocks on half-open connections
-              @websocket = nil
+              teardown_connection
               break
             else
               # Still waiting for pong, don't send another ping yet
@@ -1287,13 +1289,9 @@ class GentilityAgent
             end
           end
 
-          # Send ping and track it
-          # Spawn the send so the ping fiber never blocks on a half-open connection.
-          # If the send blocks, the throwaway fiber is abandoned, but this fiber
-          # stays alive to detect the pong timeout on the next iteration.
           @last_ping_sent = Time.instant
           @ping_in_flight = true
-          spawn { send_message({"type" => "ping", "timestamp" => Time.utc.to_unix_f}) }
+          send_message({"type" => "ping", "timestamp" => Time.utc.to_unix_f})
           Log.debug { "Sent ping" }
         end
       rescue ex : Exception
@@ -1303,7 +1301,7 @@ class GentilityAgent
         unless @graceful_shutdown
           Log.warn { "Connection monitor exited, triggering reconnect" }
           # Don't call close() - blocks on half-open connections
-          @websocket = nil
+          teardown_connection
         end
       end
     end
@@ -1324,7 +1322,7 @@ class GentilityAgent
 
         if current_websocket?(websocket)
           Log.warn { "WebSocket reader died, forcing reconnect" } unless @graceful_shutdown
-          @websocket = nil
+          teardown_connection
         end
       end
     end
@@ -1335,24 +1333,22 @@ class GentilityAgent
     !!(current && current.same?(websocket))
   end
 
+  private def teardown_connection
+    @writer.try(&.close)
+    @writer = nil
+    @websocket = nil
+  end
+
   # Helper method to send a message as JSON
   private def send_message(data : Hash)
     debug_log("→ Sending: #{data.inspect}")
 
-    websocket = @websocket
-    return unless websocket && !websocket.closed?
+    writer = @writer
+    return unless writer
 
-    begin
-      json = data.to_json
-      Log.debug { "→ Sending JSON message (#{json.size} bytes)" }
-      websocket.send(json)
-    rescue ex : Exception
-      Log.error { "Error sending message: #{ex.class.name} - #{ex.message}" }
-      if current_websocket?(websocket)
-        Log.warn { "Send failed, forcing reconnect" } unless @graceful_shutdown
-        @websocket = nil
-      end
-    end
+    json = data.to_json
+    Log.debug { "→ Sending JSON message (#{json.size} bytes)" }
+    writer.send(json)
   end
 
   # Advertise available credentials to the server
