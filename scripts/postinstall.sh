@@ -9,6 +9,22 @@ export LC_CTYPE=en_US.UTF-8
 chown -R gentility:gentility /var/log/gentility-agent
 chown -R gentility:gentility /var/lib/gentility-agent
 
+read_with_timeout() {
+    output_file="$1"
+    timeout_secs="${2:-30}"
+
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$timeout_secs" sh -c '
+            IFS= read -r value || exit 1
+            printf "%s\n" "$value" > "$1"
+        ' sh "$output_file"
+        return $?
+    fi
+
+    IFS= read -r value || return 1
+    printf "%s\n" "$value" > "$output_file"
+}
+
 # Migrate old .conf to .yaml if it exists
 if [ -f /etc/gentility.conf ] && [ ! -f /etc/gentility.yaml ]; then
     echo "Migrating configuration from .conf to .yaml format..."
@@ -128,22 +144,29 @@ if [ -t 0 ] && [ -f "$MANAGE_SUDO" ] && [ ! -f /etc/sudoers.d/gentility ]; then
     echo "  3) Full (unrestricted)"
     printf "Choose [1-3]: "
 
-    # Read with 30-second timeout, default to 1
-    if read -t 30 sudo_choice 2>/dev/null; then
-        case "$sudo_choice" in
-            2)
-                "$MANAGE_SUDO" enable limited
-                ;;
-            3)
-                "$MANAGE_SUDO" enable full
-                ;;
-            *)
-                echo "No sudo access configured."
-                ;;
-        esac
+    # Read with a timeout using POSIX sh-compatible tools.
+    if sudo_choice_file=$(mktemp /tmp/gentility-sudo-choice.XXXXXX); then
+        if read_with_timeout "$sudo_choice_file" 30 < /dev/tty; then
+            sudo_choice=$(cat "$sudo_choice_file")
+            case "$sudo_choice" in
+                2)
+                    "$MANAGE_SUDO" enable limited
+                    ;;
+                3)
+                    "$MANAGE_SUDO" enable full
+                    ;;
+                *)
+                    echo "No sudo access configured."
+                    ;;
+            esac
+        else
+            echo ""
+            echo "No input received, skipping sudo configuration."
+        fi
+        rm -f "$sudo_choice_file"
     else
         echo ""
-        echo "No input received, skipping sudo configuration."
+        echo "Could not create a temporary file, skipping sudo configuration."
     fi
 fi
 
