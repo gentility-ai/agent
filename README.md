@@ -9,6 +9,7 @@ A lightweight daemon that connects your servers and computers to Gentility AI.
 - **Secure credential exchange** using X25519 key exchange and AES-256-CBC encryption
 - **Database query execution** (PostgreSQL and MySQL)
 - **File read/write operations** (when enabled)
+- **Egress mode** for reaching internal services on the agent's network (opt-in, default-deny SSRF policy)
 - **Lockable** for ultimate peace of mind
 
 ## Supported Platforms
@@ -182,6 +183,39 @@ SECURITY_EXTENDABLE="true"           # Allow extending security sessions
 PROMISCUOUS_ENABLED="true"           # Enable promiscuous mode
 PROMISCUOUS_AUTH_MODE="password"     # Auth mode for promiscuous operations
 ```
+
+### Egress Mode (Server-Initiated Outbound Proxy)
+
+Egress mode lets the Gentility server open outbound TCP connections **through** the agent — useful for reaching internal services (databases, dashboards, internal APIs) that only the agent's network can see. The server tunnels the bytes over the existing authenticated WebSocket; no inbound ports are opened on the agent host.
+
+**Egress is disabled by default and there is no CLI flag — it must be opted into in `/etc/gentility.yaml`:**
+
+```yaml
+egress:
+  enabled: true                  # required to accept any egress frame
+  allow_loopback: false          # allow connecting to 127.0.0.0/8 (default: false)
+  allow_private_networks: false  # allow RFC1918 / CGNAT / IPv6 ULA (default: false)
+```
+
+After editing the config, restart the agent:
+
+```bash
+sudo systemctl restart gentility
+```
+
+**Default-deny safety net.** Even with `enabled: true`, the agent's dialer rejects any destination that resolves to: loopback, link-local (including the cloud metadata address `169.254.169.254`), IPv4/IPv6 multicast, broadcast, the `0.0.0.0/8` wildcard range, and — unless `allow_private_networks: true` — RFC1918, CGNAT (`100.64.0.0/10`), and IPv6 ULA. IPv4-mapped IPv6 addresses (`::ffff:10.0.0.1`) are unmapped before the policy check so they cannot be used to bypass it.
+
+**When to enable each toggle:**
+
+- **Just `enabled: true`** — agent can reach the public internet on behalf of the server, but every internal range is blocked. Safest starting point.
+- **`+ allow_private_networks: true`** — required if the whole point is to reach internal services on RFC1918 addresses (e.g. a Postgres on `10.0.0.5`). Only enable if you trust the server-side authorization controls; this is the dangerous knob.
+- **`+ allow_loopback: true`** — required to reach services bound to `127.0.0.1` on the agent host itself. Most installs do not need this.
+
+**Operational notes:**
+
+- Egress streams are isolated per connection: a slow or stuck destination cannot stall the agent's heartbeats or other streams (the writer is bounded and a saturated stream is torn down with an `io_error`).
+- Errors and stream lifecycle events are reported back to the server as `egress.stream.error` / `egress.stream.close` frames, so failures are visible in the server-side egress logs rather than silently hanging.
+- The server side must be running with `EGRESS_ENABLED=true` for any egress traffic to actually flow; check with your Gentility administrator.
 
 ## Service Management
 

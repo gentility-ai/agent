@@ -345,4 +345,254 @@ describe AgentEgressManager do
       fail "no error frame received"
     end
   end
+
+  it "removes the stream from the registry after the destination closes (clean EOF)" do
+    dest_server = TCPServer.new("127.0.0.1", 0)
+    dest_port = dest_server.local_address.as(Socket::IPAddress).port
+
+    spawn do
+      client = dest_server.accept
+      client.close
+    end
+
+    frames = Channel(String).new(10)
+    send_frame = ->(json : String) {
+      frames.send(json)
+      nil
+    }
+
+    dialer = AgentEgressDialer.new(allow_loopback: true)
+    manager = AgentEgressManager.new(send_frame: send_frame, dialer: dialer)
+
+    manager.open_stream("stream-cleanup-eof", "127.0.0.1", dest_port, 1000)
+
+    JSON.parse(frames.receive)["type"].as_s.should eq("egress.stream.opened")
+    JSON.parse(frames.receive)["type"].as_s.should eq("egress.stream.close")
+
+    # Reader fiber's ensure block calls shutdown → on_closed, so the
+    # registry should drain. Allow a couple of yields to settle.
+    deadline = Time.instant + 1.second
+    while manager.stream_count > 0 && Time.instant < deadline
+      sleep 10.milliseconds
+    end
+    manager.stream_count.should eq(0)
+
+    dest_server.close
+  end
+
+  it "emits egress.stream.error(io_error) when the destination resets the connection" do
+    dest_server = TCPServer.new("127.0.0.1", 0)
+    dest_port = dest_server.local_address.as(Socket::IPAddress).port
+
+    spawn do
+      client = dest_server.accept
+      # Force RST instead of FIN so the agent's reader sees an IO::Error,
+      # not a clean EOF. This is the real-world failure we used to swallow.
+      client.linger = 0
+      client.close
+    end
+
+    frames = Channel(String).new(10)
+    send_frame = ->(json : String) {
+      frames.send(json)
+      nil
+    }
+
+    dialer = AgentEgressDialer.new(allow_loopback: true)
+    manager = AgentEgressManager.new(send_frame: send_frame, dialer: dialer)
+
+    manager.open_stream("stream-reset", "127.0.0.1", dest_port, 1000)
+
+    JSON.parse(frames.receive)["type"].as_s.should eq("egress.stream.opened")
+
+    # Some platforms surface a RST as a clean EOF rather than ECONNRESET
+    # depending on timing. Either way, the stream MUST tear down with
+    # exactly one terminal frame (close OR error) and drop from the
+    # registry — that's the contract this test is locking in.
+    select
+    when json = frames.receive
+      parsed = JSON.parse(json)
+      type = parsed["type"].as_s
+      ["egress.stream.close", "egress.stream.error"].should contain(type)
+      parsed["stream_id"].as_s.should eq("stream-reset")
+    when timeout(2.seconds)
+      fail "no terminal frame received after peer reset"
+    end
+
+    deadline = Time.instant + 1.second
+    while manager.stream_count > 0 && Time.instant < deadline
+      sleep 10.milliseconds
+    end
+    manager.stream_count.should eq(0)
+
+    dest_server.close
+  end
+
+  it "handle_data emits egress.stream.error(io_error) and tears down when the destination is dead" do
+    dest_server = TCPServer.new("127.0.0.1", 0)
+    dest_port = dest_server.local_address.as(Socket::IPAddress).port
+
+    accepted = Channel(TCPSocket).new(1)
+    spawn do
+      client = dest_server.accept
+      accepted.send(client)
+    end
+
+    frames = Channel(String).new(20)
+    send_frame = ->(json : String) {
+      frames.send(json)
+      nil
+    }
+
+    dialer = AgentEgressDialer.new(allow_loopback: true)
+    manager = AgentEgressManager.new(send_frame: send_frame, dialer: dialer)
+
+    manager.open_stream("stream-dead-write", "127.0.0.1", dest_port, 1000)
+    JSON.parse(frames.receive)["type"].as_s.should eq("egress.stream.opened")
+
+    dest_client = accepted.receive
+    dest_client.linger = 0
+    dest_client.close
+
+    # Push a few writes so at least one race-free attempt lands after RST.
+    5.times do
+      manager.handle_data("stream-dead-write", Base64.strict_encode("payload"))
+      Fiber.yield
+    end
+
+    saw_error = false
+    deadline = Time.instant + 2.seconds
+    while !saw_error && Time.instant < deadline
+      select
+      when json = frames.receive
+        parsed = JSON.parse(json)
+        if parsed["type"].as_s == "egress.stream.error"
+          parsed["stream_id"].as_s.should eq("stream-dead-write")
+          parsed["code"].as_s.should eq("io_error")
+          saw_error = true
+        end
+      when timeout(100.milliseconds)
+        # try again — frames may interleave with .data acks
+      end
+    end
+
+    saw_error.should be_true
+
+    deadline = Time.instant + 1.second
+    while manager.stream_count > 0 && Time.instant < deadline
+      sleep 10.milliseconds
+    end
+    manager.stream_count.should eq(0)
+
+    dest_server.close
+  end
+
+  it "removes the stream after handle_close once the destination acknowledges the half-close" do
+    dest_server = TCPServer.new("127.0.0.1", 0)
+    dest_port = dest_server.local_address.as(Socket::IPAddress).port
+
+    spawn do
+      client = dest_server.accept
+      buf = Bytes.new(64)
+      loop do
+        n = client.read(buf)
+        break if n == 0
+      end
+      # mirror the half-close so the agent's reader sees EOF too.
+      client.close
+    end
+
+    frames = Channel(String).new(10)
+    send_frame = ->(json : String) {
+      frames.send(json)
+      nil
+    }
+
+    dialer = AgentEgressDialer.new(allow_loopback: true)
+    manager = AgentEgressManager.new(send_frame: send_frame, dialer: dialer)
+
+    manager.open_stream("stream-halfclose", "127.0.0.1", dest_port, 1000)
+    JSON.parse(frames.receive)["type"].as_s.should eq("egress.stream.opened")
+
+    manager.handle_close("stream-halfclose", nil)
+
+    # Drain frames until we see the terminal close coming back from the
+    # reader. There should be no spurious error frame for a clean teardown.
+    saw_close = false
+    deadline = Time.instant + 2.seconds
+    while !saw_close && Time.instant < deadline
+      select
+      when json = frames.receive
+        type = JSON.parse(json)["type"].as_s
+        type.should_not eq("egress.stream.error")
+        saw_close = true if type == "egress.stream.close"
+      when timeout(100.milliseconds)
+      end
+    end
+    saw_close.should be_true
+
+    deadline = Time.instant + 1.second
+    while manager.stream_count > 0 && Time.instant < deadline
+      sleep 10.milliseconds
+    end
+    manager.stream_count.should eq(0)
+
+    dest_server.close
+  end
+end
+
+describe AgentEgressStream do
+  it "enqueue_write returns false when the write queue is saturated" do
+    # Build a real TCP pair where the destination never reads, then
+    # crank the agent-side send buffer way down so a single chunk can
+    # block in the kernel. With the writer fiber parked on socket.write,
+    # the bounded channel saturates and the next enqueue must time out
+    # rather than head-of-line block the dispatcher.
+    server = TCPServer.new("127.0.0.1", 0)
+    port = server.local_address.as(Socket::IPAddress).port
+
+    accepted = Channel(TCPSocket).new(1)
+    spawn do
+      client = server.accept
+      accepted.send(client)
+    end
+
+    agent_side = TCPSocket.new("127.0.0.1", port)
+    dest_side = accepted.receive
+
+    agent_side.send_buffer_size = 1024
+    dest_side.recv_buffer_size = 1024
+
+    frames = [] of String
+    send_frame = ->(json : String) {
+      frames << json
+      nil
+    }
+
+    stream = AgentEgressStream.new(
+      stream_id: "saturation",
+      socket: agent_side,
+      send_frame: send_frame,
+      write_capacity: 2,
+      write_enqueue_timeout: 50.milliseconds,
+    )
+
+    big = Bytes.new(64 * 1024, 0x41_u8)
+
+    # Hammer enqueue until either the channel saturates (false) or we
+    # blow past a generous bound — whichever comes first.
+    saw_false = false
+    20.times do
+      unless stream.enqueue_write(big)
+        saw_false = true
+        break
+      end
+    end
+
+    saw_false.should be_true
+
+    stream.shutdown
+    dest_side.close rescue nil
+    server.close
+  end
 end
