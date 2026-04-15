@@ -145,33 +145,22 @@ class GentilityAgent
     config_hash = config.as_h?
     return Security.configure("none", nil, nil, 1800, true, true, "password", true, 5, "temporary", 900) unless config_hash
 
-    # Support both YAML security section and legacy flat keys
-    # Handle case where security: exists but is nil/empty
+    # Read nested `security:` section; tolerate missing/empty.
     security_any = config["security"]?
-    security_config = (security_any && security_any.as_h?) ? security_any : config
+    security_config = (security_any && security_any.as_h?) ? security_any : YAML::Any.new({} of YAML::Any => YAML::Any)
 
-    mode = security_config["mode"]?.try(&.as_s?) ||
-           security_config["SECURITY_MODE"]?.try(&.as_s?) || "none"
+    mode = security_config["mode"]?.try(&.as_s?) || "none"
+    password = security_config["password"]?.try(&.as_s?)
+    totp_secret = security_config["totp_secret"]?.try(&.as_s?)
+    timeout = security_config["unlock_timeout"]?.try(&.as_i?) || 1800
 
-    password = security_config["password"]?.try(&.as_s?) ||
-               security_config["SECURITY_PASSWORD"]?.try(&.as_s?)
+    extendable = security_config["extendable"]?.try(&.as_bool?)
+    extendable = true if extendable.nil?
 
-    totp_secret = security_config["totp_secret"]?.try(&.as_s?) ||
-                  security_config["SECURITY_TOTP_SECRET"]?.try(&.as_s?)
+    promiscuous_enabled = security_config["promiscuous_enabled"]?.try(&.as_bool?)
+    promiscuous_enabled = true if promiscuous_enabled.nil?
 
-    timeout = security_config["unlock_timeout"]?.try(&.as_i?) ||
-              security_config["SECURITY_UNLOCK_TIMEOUT"]?.try(&.as_i?) || 1800
-
-    extendable = security_config["extendable"]?.try(&.as_bool?) ||
-                 security_config["SECURITY_EXTENDABLE"]?.try { |v| parse_boolean_from_any(v) } ||
-                 true
-
-    promiscuous_enabled = security_config["promiscuous_enabled"]?.try(&.as_bool?) ||
-                          security_config["PROMISCUOUS_ENABLED"]?.try { |v| parse_boolean_from_any(v) } ||
-                          true
-
-    promiscuous_auth_mode = security_config["promiscuous_auth_mode"]?.try(&.as_s?) ||
-                            security_config["PROMISCUOUS_AUTH_MODE"]?.try(&.as_s?) || "password"
+    promiscuous_auth_mode = security_config["promiscuous_auth_mode"]?.try(&.as_s?) || "password"
 
     # Load rate limiting config (nested under security.rate_limiting or flat)
     # Handle case where rate_limiting: exists but is nil/empty
@@ -220,28 +209,6 @@ class GentilityAgent
 
     if @egress_enabled
       Log.info { "Egress enabled (loopback=#{@egress_allow_loopback}, private=#{@egress_allow_private_networks})" }
-    end
-  end
-
-  private def parse_boolean_from_any(value : YAML::Any) : Bool
-    if bool_val = value.as_bool?
-      bool_val
-    elsif str_val = value.as_s?
-      parse_boolean(str_val, false)
-    else
-      false
-    end
-  end
-
-  private def parse_boolean(value : String?, default : Bool) : Bool
-    return default unless value
-    case value.downcase
-    when "true", "1", "yes", "on"
-      true
-    when "false", "0", "no", "off"
-      false
-    else
-      default
     end
   end
 

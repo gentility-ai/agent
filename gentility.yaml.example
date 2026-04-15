@@ -52,6 +52,13 @@ security:
   #   lockout_mode: temporary          # "temporary" or "permanent" (default: temporary)
   #   lockout_duration: 900            # Lockout duration in seconds (default: 900 = 15min)
 
+# Egress mode (server-initiated outbound proxy)
+# Managed by `gentility egress …` — all three default to false.
+# egress:
+#   enabled: false                   # must be true to accept egress frames
+#   allow_loopback: false            # allow 127.0.0.0/8, ::1
+#   allow_private_networks: false    # allow RFC1918 / CGNAT / IPv6 ULA
+
 # Encrypted database credentials (managed by server via store_credentials command)
 # Database credentials are stored here encrypted with your agent's Ed25519 key
 # Format: db-target-uuid: base64_encrypted_credentials

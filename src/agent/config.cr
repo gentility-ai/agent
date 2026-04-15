@@ -74,42 +74,73 @@ module AgentConfig
     nil
   end
 
-  # Update a single config value
-  def self.update_config(config_file : String, key : String, value : String)
-    lines = [] of String
-    found = false
+  # Walk a nested path in a parsed YAML config, returning the value at the
+  # leaf or nil if any intermediate key is missing or not a hash.
+  def self.yaml_dig(config : YAML::Any?, *keys : String) : YAML::Any?
+    current = config
+    keys.each do |key|
+      return nil unless c = current
+      h = c.as_h?
+      return nil unless h
+      current = h[YAML::Any.new(key)]?
+    end
+    current
+  end
 
-    if File.exists?(config_file)
-      File.each_line(config_file) do |line|
-        if line.starts_with?("#{key}=") || line.starts_with?("##{key}=")
-          lines << "#{key}=#{value}"
-          found = true
-        else
-          lines << line
-        end
+  # Set a nested YAML value at `path`, creating intermediate hashes as needed.
+  # Reads the existing file (or starts empty), mutates, writes back.
+  def self.update_yaml(config_file : String, path : Array(String), value : String | Bool) : Nil
+    raise ArgumentError.new("path must not be empty") if path.empty?
+
+    root = load_root_hash(config_file)
+
+    current = root
+    path[0..-2].each do |key|
+      key_any = YAML::Any.new(key)
+      nested = current[key_any]?.try(&.as_h?)
+      unless nested
+        nested = {} of YAML::Any => YAML::Any
+        current[key_any] = YAML::Any.new(nested)
       end
+      current = nested
     end
 
-    unless found
-      lines << "#{key}=#{value}"
-    end
+    leaf_key = YAML::Any.new(path.last)
+    current[leaf_key] = case value
+                        in String then YAML::Any.new(value)
+                        in Bool   then YAML::Any.new(value)
+                        end
 
-    File.write(config_file, lines.join("\n") + "\n")
+    File.write(config_file, root.to_yaml)
     File.chmod(config_file, 0o640)
   end
 
-  # Remove config keys
-  def self.remove_config(config_file : String, keys : Array(String))
+  # Delete a nested YAML value at `path`. No-op if the path doesn't exist.
+  def self.delete_yaml(config_file : String, path : Array(String)) : Nil
     return unless File.exists?(config_file)
+    raise ArgumentError.new("path must not be empty") if path.empty?
 
-    lines = [] of String
-    File.each_line(config_file) do |line|
-      # Skip lines for the specified keys
-      next if keys.any? { |key| line.starts_with?("#{key}=") || line.starts_with?("##{key}=") }
-      lines << line
+    root = load_root_hash(config_file)
+
+    current = root
+    path[0..-2].each do |key|
+      nested = current[YAML::Any.new(key)]?.try(&.as_h?)
+      return unless nested
+      current = nested
     end
 
-    File.write(config_file, lines.join("\n") + "\n")
+    current.delete(YAML::Any.new(path.last))
+
+    File.write(config_file, root.to_yaml)
     File.chmod(config_file, 0o640)
+  end
+
+  private def self.load_root_hash(config_file : String) : Hash(YAML::Any, YAML::Any)
+    return {} of YAML::Any => YAML::Any unless File.exists?(config_file)
+
+    content = File.read(config_file)
+    return {} of YAML::Any => YAML::Any if content.strip.empty?
+
+    YAML.parse(content).as_h? || {} of YAML::Any => YAML::Any
   end
 end

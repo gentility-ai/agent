@@ -143,52 +143,75 @@ sudo rm /etc/apt/keyrings/gentility-packages.asc
 
 ## Configuration
 
-The agent is configured through `/etc/gentility.yaml`.
+The agent is configured through `/etc/gentility.yaml`. Under the hood it's a
+plain YAML file — most of the time you'll use `gentility auth` and the
+`gentility security` / `gentility egress` commands to manage it, but you can
+also edit it directly.
 
 ### Configuration File
 
-The only required configuration is your access token:
+After running `gentility auth`, a minimal config looks like:
 
-```bash
+```yaml
 # /etc/gentility.yaml
-GENTILITY_TOKEN="gnt_1234567890abcdef"
+machine_key: genkey-agent-...
+nickname: staging-app-03
+environment: production
 ```
-
-Get your access token from your Gentility AI dashboard.
 
 ### Advanced Configuration Options
 
-The configuration file supports additional security and operational settings:
-
-```bash
+```yaml
 # /etc/gentility.yaml
 
-# Required: Your access token
-GENTILITY_TOKEN="gnt_1234567890abcdef"
+# Required: machine key (written by `gentility auth`)
+machine_key: genkey-agent-...
 
-# Optional: Server connection settings
-SERVER_URL="wss://ws.gentility.ai"  # Default server
-NICKNAME="staging-app-03"                 # Agent nickname (default: hostname)
-ENVIRONMENT="prod"                   # Environment: prod or staging
-DEBUG="false"                        # Enable debug logging
+# Optional: server / identity
+server_url: wss://ws.gentility.ai   # default: wss://ws.gentility.ai
+nickname: staging-app-03             # default: hostname
+environment: production              # prod / dev
+debug: false                         # enable debug logging
 
-# Security settings
-SECURITY_MODE="none"                 # Security mode: none, password, totp
-SECURITY_PASSWORD="mypassword"       # Password for password mode
-SECURITY_TOTP_SECRET="ABC123..."     # TOTP secret for TOTP mode
-SECURITY_UNLOCK_TIMEOUT="1800"   # Security timeout in seconds (30 minutes)
-SECURITY_EXTENDABLE="true"           # Allow extending security sessions
+# Security settings (managed by `gentility security …`)
+security:
+  mode: none                         # none, password, or totp
+  password: mypassword               # for password mode
+  totp_secret: ABC123...             # for totp mode (base32)
+  unlock_timeout: 1800               # seconds
+  extendable: true                   # extend session on activity
+  promiscuous_enabled: true          # allow server to export security config
+  promiscuous_auth_mode: password    # password or totp
 
-# Promiscuous mode (allows config sharing)
-PROMISCUOUS_ENABLED="true"           # Enable promiscuous mode
-PROMISCUOUS_AUTH_MODE="password"     # Auth mode for promiscuous operations
+# Egress settings (managed by `gentility egress …`)
+egress:
+  enabled: false                     # must be true to accept egress frames
+  allow_loopback: false              # allow 127.0.0.0/8, ::1
+  allow_private_networks: false      # allow RFC1918 / CGNAT / IPv6 ULA
 ```
 
 ### Egress Mode (Server-Initiated Outbound Proxy)
 
 Egress mode lets the Gentility server open outbound TCP connections **through** the agent — useful for reaching internal services (databases, dashboards, internal APIs) that only the agent's network can see. The server tunnels the bytes over the existing authenticated WebSocket; no inbound ports are opened on the agent host.
 
-**Egress is disabled by default and there is no CLI flag — it must be opted into in `/etc/gentility.yaml`:**
+**Egress is disabled by default — opt in with the `gentility egress` CLI:**
+
+```bash
+# Enable egress, optionally allowing internal networks
+sudo gentility egress enable --allow-private-networks
+
+# Toggle loopback separately
+sudo gentility egress set --allow-loopback
+
+# Check current state
+gentility egress status
+
+# Turn it off again
+sudo gentility egress disable
+```
+
+These commands write to the `egress:` section of `/etc/gentility.yaml`. You
+can also edit the file directly:
 
 ```yaml
 egress:
@@ -197,7 +220,7 @@ egress:
   allow_private_networks: false  # allow RFC1918 / CGNAT / IPv6 ULA (default: false)
 ```
 
-After editing the config, restart the agent:
+After either path, restart the agent to apply:
 
 ```bash
 sudo systemctl restart gentility
@@ -455,10 +478,12 @@ gentility start [options]           # Alias for 'run'
 gentility help                      # Show help
 
 # Setup and Configuration
-gentility setup <token>             # Initial setup
+gentility auth                      # OAuth + machine key provisioning
+gentility setup <token>             # Manual setup (advanced)
 gentility security <mode> [value]   # Configure security
 gentility test-totp <code>          # Test TOTP validation
 gentility promiscuous <action>      # Configure promiscuous mode
+gentility egress <action>           # Configure server-initiated egress
 
 # Run Options
 --token=<token>                     # Access token
@@ -468,12 +493,21 @@ gentility promiscuous <action>      # Configure promiscuous mode
 security totp [secret]              # TOTP authentication
 security password [password]        # Password authentication
 security none                       # No security
+security clear-lockout              # Clear rate-limit lockout
 
 # Promiscuous Actions
 promiscuous enable                  # Enable promiscuous mode
 promiscuous disable                 # Disable promiscuous mode
 promiscuous status                  # Show status
 promiscuous auth <mode>             # Set auth mode (password|totp)
+
+# Egress Actions
+egress status                               # Show current egress config
+egress enable [flags]                       # Enable egress (with optional flags)
+egress disable                              # Disable egress
+egress set <flags>                          # Change allow flags only
+#   --allow-loopback[=true|false]
+#   --allow-private-networks[=true|false]
 ```
 
 ## For Developers

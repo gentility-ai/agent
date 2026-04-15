@@ -63,27 +63,13 @@ def parse_arguments
 
   # Apply config file settings (YAML format)
   if config
-    # Only accept machine_key (OAuth tokens are never stored)
     access_key = config["machine_key"]?.try(&.as_s?) ||
-                 config["access_key"]?.try(&.as_s?) ||
-                 config["ACCESS_KEY"]?.try(&.as_s?) ||
-                 config["GENTILITY_TOKEN"]?.try(&.as_s?)
+                 config["access_key"]?.try(&.as_s?)
 
-    server_url = config["server_url"]?.try(&.as_s?) ||
-                 config["SERVER_URL"]?.try(&.as_s?) ||
-                 server_url
-
-    nickname = config["nickname"]?.try(&.as_s?) ||
-               config["NICKNAME"]?.try(&.as_s?) ||
-               nickname
-
-    environment = config["environment"]?.try(&.as_s?) ||
-                  config["ENVIRONMENT"]?.try(&.as_s?) ||
-                  environment
-
-    debug = config["debug"]?.try(&.as_bool?) ||
-            config["DEBUG"]?.try { |v| v.as_s?.try { |s| s.downcase == "true" || s == "1" || s.downcase == "yes" } } ||
-            debug
+    server_url = config["server_url"]?.try(&.as_s?) || server_url
+    nickname = config["nickname"]?.try(&.as_s?) || nickname
+    environment = config["environment"]?.try(&.as_s?) || environment
+    debug = config["debug"]?.try(&.as_bool?) || debug
   end
 
   # 3. Override with environment variables (systemd loads config as env vars too)
@@ -359,8 +345,9 @@ def setup_security(mode : String, value : String? = nil)
     puts ""
 
     # Update config file
-    AgentConfig.update_config(config_file, "SECURITY_MODE", "totp")
-    AgentConfig.update_config(config_file, "SECURITY_TOTP_SECRET", secret)
+    AgentConfig.update_yaml(config_file, ["security", "mode"], "totp")
+    AgentConfig.update_yaml(config_file, ["security", "totp_secret"], secret)
+    AgentConfig.delete_yaml(config_file, ["security", "password"])
   when "password"
     password = value
     unless password
@@ -379,16 +366,18 @@ def setup_security(mode : String, value : String? = nil)
     puts ""
 
     # Update config file
-    AgentConfig.update_config(config_file, "SECURITY_MODE", "password")
-    AgentConfig.update_config(config_file, "SECURITY_PASSWORD", password)
+    AgentConfig.update_yaml(config_file, ["security", "mode"], "password")
+    AgentConfig.update_yaml(config_file, ["security", "password"], password)
+    AgentConfig.delete_yaml(config_file, ["security", "totp_secret"])
   when "none"
     puts "🔐 Security Disabled"
     puts "==================="
     puts "Security mode set to none - no authentication required."
     puts ""
 
-    AgentConfig.update_config(config_file, "SECURITY_MODE", "none")
-    AgentConfig.remove_config(config_file, ["SECURITY_PASSWORD", "SECURITY_TOTP_SECRET"])
+    AgentConfig.update_yaml(config_file, ["security", "mode"], "none")
+    AgentConfig.delete_yaml(config_file, ["security", "password"])
+    AgentConfig.delete_yaml(config_file, ["security", "totp_secret"])
   else
     puts "❌ Error: Invalid security mode. Use: totp, password, or none"
     exit 1
@@ -829,10 +818,10 @@ end
 
 def test_totp_validation(code : String)
   config_file = AgentConfig.get_config_path
-  config = AgentConfig.load_config_from_file(config_file) || {} of String => String
+  config = AgentConfig.load_config_from_file(config_file)
 
-  totp_secret = config["SECURITY_TOTP_SECRET"]?
-  mode = config["SECURITY_MODE"]?
+  mode = AgentConfig.yaml_dig(config, "security", "mode").try(&.as_s?)
+  totp_secret = AgentConfig.yaml_dig(config, "security", "totp_secret").try(&.as_s?)
 
   unless mode == "totp"
     puts "❌ Error: TOTP mode is not configured"
@@ -846,7 +835,7 @@ def test_totp_validation(code : String)
   end
 
   begin
-    totp = CrOTP::TOTP.new(totp_secret.as(String))
+    totp = CrOTP::TOTP.new(totp_secret)
     if totp.verify(code)
       puts "✅ TOTP validation successful!"
       puts "Code '#{code}' is valid for the configured secret."
@@ -864,10 +853,11 @@ end
 
 def show_promiscuous_status
   config_file = AgentConfig.get_config_path
-  config = AgentConfig.load_config_from_file(config_file) || {} of String => String
+  config = AgentConfig.load_config_from_file(config_file)
 
-  enabled = config["PROMISCUOUS_ENABLED"]? != "false"
-  auth_mode = config["PROMISCUOUS_AUTH_MODE"]? || "password"
+  enabled = AgentConfig.yaml_dig(config, "security", "promiscuous_enabled").try(&.as_bool?)
+  enabled = true if enabled.nil?
+  auth_mode = AgentConfig.yaml_dig(config, "security", "promiscuous_auth_mode").try(&.as_s?) || "password"
 
   puts "🔐 Promiscuous Mode Status"
   puts "========================="
@@ -883,7 +873,7 @@ end
 def set_promiscuous_mode(enabled : Bool)
   config_file = AgentConfig.get_config_path
 
-  AgentConfig.update_config(config_file, "PROMISCUOUS_ENABLED", enabled.to_s)
+  AgentConfig.update_yaml(config_file, ["security", "promiscuous_enabled"], enabled)
 
   puts "🔐 Promiscuous Mode #{enabled ? "Enabled" : "Disabled"}"
   puts "==============================#{enabled ? "=" : "=========="}"
@@ -906,7 +896,7 @@ def set_promiscuous_auth_mode(mode : String)
 
   config_file = AgentConfig.get_config_path
 
-  AgentConfig.update_config(config_file, "PROMISCUOUS_AUTH_MODE", mode)
+  AgentConfig.update_yaml(config_file, ["security", "promiscuous_auth_mode"], mode)
 
   puts "🔐 Promiscuous Auth Mode Set"
   puts "==========================="
@@ -922,6 +912,128 @@ def set_promiscuous_auth_mode(mode : String)
 rescue ex : Exception
   puts "❌ Error: #{ex.message}"
   exit 1
+end
+
+def handle_egress_command(args : Array(String))
+  config_file = AgentConfig.get_config_path
+  subcmd = args[0]? || "status"
+
+  case subcmd
+  when "status", "show"
+    show_egress_status
+  when "enable", "up"
+    allow_loopback, allow_private = parse_egress_flags(args[1..])
+    AgentConfig.update_yaml(config_file, ["egress", "enabled"], true)
+    AgentConfig.update_yaml(config_file, ["egress", "allow_loopback"], allow_loopback) unless allow_loopback.nil?
+    AgentConfig.update_yaml(config_file, ["egress", "allow_private_networks"], allow_private) unless allow_private.nil?
+
+    puts "🌐 Egress Enabled"
+    puts "================="
+    show_current_egress(config_file)
+    puts ""
+    puts "Note: the server must also enable this agent's egress route"
+    puts "in the Gentility UI before traffic actually flows through."
+    puts ""
+    puts "Restart the agent to apply changes:"
+    puts "  sudo systemctl restart gentility"
+    exit 0
+  when "disable", "down"
+    AgentConfig.update_yaml(config_file, ["egress", "enabled"], false)
+    puts "🌐 Egress Disabled"
+    puts "=================="
+    puts ""
+    puts "Restart the agent to apply changes:"
+    puts "  sudo systemctl restart gentility"
+    exit 0
+  when "set"
+    allow_loopback, allow_private = parse_egress_flags(args[1..])
+    if allow_loopback.nil? && allow_private.nil?
+      puts "❌ Error: `egress set` requires at least one flag"
+      puts "Usage: gentility egress set [--allow-loopback[=bool]] [--allow-private-networks[=bool]]"
+      exit 1
+    end
+    AgentConfig.update_yaml(config_file, ["egress", "allow_loopback"], allow_loopback) unless allow_loopback.nil?
+    AgentConfig.update_yaml(config_file, ["egress", "allow_private_networks"], allow_private) unless allow_private.nil?
+
+    puts "🌐 Egress Updated"
+    puts "================="
+    show_current_egress(config_file)
+    puts ""
+    puts "Restart the agent to apply changes:"
+    puts "  sudo systemctl restart gentility"
+    exit 0
+  else
+    puts "Usage: #{PROGRAM_NAME} egress <status|enable|disable|set> [flags]"
+    puts ""
+    puts "Commands:"
+    puts "  status                       Show current egress configuration"
+    puts "  enable [flags]               Enable egress (optionally set allow flags)"
+    puts "  disable                      Disable egress"
+    puts "  set <flags>                  Change allow flags without toggling enabled"
+    puts ""
+    puts "Flags:"
+    puts "  --allow-loopback[=true|false]          Allow connecting to 127.0.0.0/8, ::1"
+    puts "  --allow-private-networks[=true|false]  Allow RFC1918 / CGNAT / IPv6 ULA"
+    puts ""
+    puts "Examples:"
+    puts "  gentility egress enable"
+    puts "  gentility egress enable --allow-private-networks"
+    puts "  gentility egress set --allow-loopback=true"
+    puts "  gentility egress disable"
+    exit 1
+  end
+rescue ex : Exception
+  puts "❌ Error: #{ex.message}"
+  exit 1
+end
+
+def parse_egress_flags(args : Array(String)) : {Bool?, Bool?}
+  allow_loopback : Bool? = nil
+  allow_private : Bool? = nil
+
+  args.each do |arg|
+    case arg
+    when "--allow-loopback", "--allow-loopback=true"
+      allow_loopback = true
+    when "--allow-loopback=false", "--no-allow-loopback"
+      allow_loopback = false
+    when "--allow-private-networks", "--allow-private-networks=true"
+      allow_private = true
+    when "--allow-private-networks=false", "--no-allow-private-networks"
+      allow_private = false
+    else
+      puts "❌ Unknown egress flag: #{arg}"
+      puts "Valid flags: --allow-loopback, --allow-private-networks (each accepts =true|=false)"
+      exit 1
+    end
+  end
+
+  {allow_loopback, allow_private}
+end
+
+def show_egress_status
+  config_file = AgentConfig.get_config_path
+  puts "🌐 Egress Configuration"
+  puts "======================="
+  show_current_egress(config_file)
+  puts ""
+  puts "Config file: #{config_file}"
+  puts ""
+  puts "Note: enabling egress here only advertises the capability to the"
+  puts "server. An admin must still enable the route in the Gentility UI"
+  puts "before traffic flows through this agent."
+  exit 0
+end
+
+def show_current_egress(config_file : String)
+  config = AgentConfig.load_config_from_file(config_file)
+  enabled = AgentConfig.yaml_dig(config, "egress", "enabled").try(&.as_bool?) || false
+  loopback = AgentConfig.yaml_dig(config, "egress", "allow_loopback").try(&.as_bool?) || false
+  private_nets = AgentConfig.yaml_dig(config, "egress", "allow_private_networks").try(&.as_bool?) || false
+
+  puts "Enabled:                #{enabled ? "✅ yes" : "❌ no"}"
+  puts "Allow loopback:         #{loopback ? "✅ yes" : "❌ no"}"
+  puts "Allow private networks: #{private_nets ? "✅ yes" : "❌ no"}"
 end
 
 def clear_lockout_from_cli
@@ -1034,24 +1146,36 @@ def show_status
   puts ""
 
   # Security status
-  mode = config["security_mode"]?.try(&.as_s?) || "none"
+  mode = AgentConfig.yaml_dig(config, "security", "mode").try(&.as_s?) || "none"
   puts "🔐 Security Mode: #{mode}"
 
   case mode
   when "totp"
-    if config["security_totp_secret"]?
+    if AgentConfig.yaml_dig(config, "security", "totp_secret")
       puts "   TOTP Secret: Configured"
     else
       puts "   TOTP Secret: Missing"
     end
   when "password"
-    if config["security_password_hash"]?
+    if AgentConfig.yaml_dig(config, "security", "password")
       puts "   Password: Configured"
     else
       puts "   Password: Missing"
     end
   when "none"
     puts "   No authentication required"
+  end
+  puts ""
+
+  # Egress status
+  egress_enabled = AgentConfig.yaml_dig(config, "egress", "enabled").try(&.as_bool?) || false
+  egress_loopback = AgentConfig.yaml_dig(config, "egress", "allow_loopback").try(&.as_bool?) || false
+  egress_private = AgentConfig.yaml_dig(config, "egress", "allow_private_networks").try(&.as_bool?) || false
+  puts "🌐 Egress: #{egress_enabled ? "✅ Enabled" : "❌ Disabled"}"
+  if egress_enabled
+    puts "   Loopback: #{egress_loopback ? "✅ Allowed" : "❌ Denied"}"
+    puts "   Private networks: #{egress_private ? "✅ Allowed" : "❌ Denied"}"
+    puts "   (Server must also enable the route for traffic to flow.)"
   end
   puts ""
 
@@ -1080,8 +1204,9 @@ def show_status
   {% end %}
 
   # Promiscuous mode
-  promiscuous_enabled = config["promiscuous_enabled"]?.try(&.as_bool?) != false
-  promiscuous_auth_mode = config["promiscuous_auth_mode"]?.try(&.as_s?) || "password"
+  promiscuous_enabled = AgentConfig.yaml_dig(config, "security", "promiscuous_enabled").try(&.as_bool?)
+  promiscuous_enabled = true if promiscuous_enabled.nil?
+  promiscuous_auth_mode = AgentConfig.yaml_dig(config, "security", "promiscuous_auth_mode").try(&.as_s?) || "password"
   puts "🔗 Promiscuous Mode: #{promiscuous_enabled ? "✅ Enabled" : "❌ Disabled"}"
   if promiscuous_enabled
     puts "   Auth Mode: #{promiscuous_auth_mode}"
@@ -1502,6 +1627,7 @@ def show_help
   puts "    status               Show agent configuration and service status"
   puts "    logs [-f] [-n N]     View service logs (-f to follow, -n for line count)"
   puts "    credentials          Manage local database credentials"
+  puts "    egress <action>      Configure server-initiated egress proxy"
   puts "    generate             Generate a new Ed25519 keypair (advanced)"
   puts "    setup <token>        Initial setup with machine key (advanced)"
   puts "    security <mode>      Configure security settings"
@@ -1538,6 +1664,20 @@ def show_help
   puts "    test <name>               Test database connection"
   puts "    list                      List stored credentials"
   puts "    remove <name>             Remove stored credentials"
+  puts ""
+  puts "EGRESS ACTIONS:"
+  puts "    status                               Show current egress configuration"
+  puts "    enable [flags]                       Enable egress (optionally set allow flags)"
+  puts "    disable                              Disable egress"
+  puts "    set <flags>                          Change allow flags only"
+  puts ""
+  puts "  Flags:"
+  puts "    --allow-loopback[=true|false]          Allow 127.0.0.0/8, ::1"
+  puts "    --allow-private-networks[=true|false]  Allow RFC1918 / CGNAT / IPv6 ULA"
+  puts ""
+  puts "  Note: enabling egress here only advertises the capability to the"
+  puts "  server. An admin must still enable the route in the Gentility UI"
+  puts "  before traffic flows through this agent."
   puts ""
   puts "PROMISCUOUS ACTIONS:"
   puts "    enable               Enable promiscuous mode"
@@ -1578,6 +1718,12 @@ def show_help
   puts "    gentility credentials test prod-db"
   puts "    gentility credentials list"
   puts "    gentility credentials remove prod-db"
+  puts "    "
+  puts "    # Configure server-initiated egress proxy"
+  puts "    gentility egress status"
+  puts "    gentility egress enable --allow-private-networks"
+  puts "    gentility egress set --allow-loopback=false"
+  puts "    gentility egress disable"
   puts "    "
   puts "    # Advanced: Manual keypair setup"
   puts "    gentility generate"
@@ -1855,6 +2001,8 @@ def main
     when "credentials"
       handle_credentials_command(ARGV[1..-1])
       exit 0
+    when "egress"
+      handle_egress_command(ARGV[1..-1])
     when "enable-sudo"
       handle_sudo_command("enable", ARGV[1..-1])
     when "disable-sudo"
@@ -1864,7 +2012,7 @@ def main
     else
       puts "Unknown command: #{ARGV[0]}"
       puts ""
-      puts "Available commands: run, start, status, setup, security, credentials, test-totp, promiscuous, enable-sudo, disable-sudo, sudo-status, version, help"
+      puts "Available commands: run, start, status, setup, security, credentials, egress, test-totp, promiscuous, enable-sudo, disable-sudo, sudo-status, version, help"
       puts "For detailed help: gentility help or gentility -h"
       exit 1
     end
