@@ -72,3 +72,4 @@ notes/
 .worktrees/
 gentility
 .private-journal/
+.mcp.json
