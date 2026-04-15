@@ -71,6 +71,15 @@ module ProtocolHelper
     assert_type_field(msg, schema_name)
     assert_required_fields(msg, schema_name)
   end
+
+  # Verify a message hash does NOT contain a forbidden field. Used to
+  # pin capver-4's "no per-frame v" rule — a regression that re-adds
+  # v: to any outgoing frame should fail this assertion.
+  def self.refute_field(msg : Hash, field : String)
+    msg.has_key?(field).should be_false,
+      "Message must not include forbidden field '#{field}' (capver 4+ " \
+      "drops per-frame v). Message keys: #{msg.keys}"
+  end
 end
 
 describe "Protocol Schema Conformance" do
@@ -80,30 +89,29 @@ describe "Protocol Schema Conformance" do
   end
 
   describe "agent → server messages" do
-    it "command.response has required fields" do
+    it "command.response has required fields and no v" do
       msg = {
         "type"       => "command.response",
-        "v"          => 2,
         "request_id" => "req_abc123",
         "result"     => {"status" => "pong"},
       }
       ProtocolHelper.assert_matches_schema(msg, "CommandResponsePayload")
+      ProtocolHelper.refute_field(msg, "v")
     end
 
-    it "command.error has required fields" do
+    it "command.error has required fields and no v" do
       msg = {
         "type"       => "command.error",
-        "v"          => 2,
         "request_id" => "req_abc123",
         "error"      => "command_not_found",
       }
       ProtocolHelper.assert_matches_schema(msg, "CommandErrorPayload")
+      ProtocolHelper.refute_field(msg, "v")
     end
 
     it "agent.status has required fields and correct type" do
       msg = {
         "type"   => "agent.status",
-        "v"      => 2,
         "status" => {
           "agent_version"    => "1.0.0",
           "hostname"         => "test-host",
@@ -120,52 +128,80 @@ describe "Protocol Schema Conformance" do
         },
       }
       ProtocolHelper.assert_matches_schema(msg, "AgentStatusPayload")
+      ProtocolHelper.refute_field(msg, "v")
     end
 
-    it "agent.credentials has required fields" do
+    it "agent.status with egress block (capver 4 advertisement)" do
+      # Per protocol/capvers.md §4(a): when the operator has opted in,
+      # the agent merges egress: { enabled: true } into the inner status
+      # map. Absence of the field is the disabled signal — the agent
+      # never sends enabled: false.
+      msg = {
+        "type"   => "agent.status",
+        "status" => {
+          "agent_version"    => "1.0.0",
+          "hostname"         => "test-host",
+          "local_ip"         => "192.168.1.1",
+          "environment"      => "test",
+          "nickname"         => "test-agent",
+          "uptime"           => 100.0,
+          "timestamp"        => Time.utc.to_unix_f,
+          "security_enabled" => false,
+          "security_mode"    => "none",
+          "active"           => false,
+          "time_remaining"   => nil,
+          "extendable"       => false,
+          "egress"           => {"enabled" => true},
+        },
+      }
+      ProtocolHelper.assert_matches_schema(msg, "AgentStatusPayload")
+      egress = msg["status"].as(Hash)["egress"].as(Hash)
+      egress["enabled"].should eq(true)
+    end
+
+    it "agent.credentials has required fields and no v" do
       msg = {
         "type"        => "agent.credentials",
-        "v"           => 2,
         "credentials" => [
           {"name" => "Main DB", "uuid" => "abc-123", "type" => "postgres", "host" => "db.example.com"},
         ],
       }
       ProtocolHelper.assert_matches_schema(msg, "AgentCredentialsPayload")
+      ProtocolHelper.refute_field(msg, "v")
     end
 
-    it "agent.security.lockout has required fields" do
+    it "agent.security.lockout has required fields and no v" do
       msg = {
         "type"            => "agent.security.lockout",
-        "v"               => 2,
         "lockout_mode"    => "temporary",
         "failed_attempts" => 5,
         "timestamp"       => Time.utc.to_unix_f,
       }
       ProtocolHelper.assert_matches_schema(msg, "AgentSecurityLockoutPayload")
+      ProtocolHelper.refute_field(msg, "v")
     end
 
-    it "heartbeat.ping has required fields" do
+    it "heartbeat.ping has required fields and no v" do
       msg = {
         "type"      => "heartbeat.ping",
-        "v"         => 2,
         "timestamp" => Time.utc.to_unix_f,
       }
       ProtocolHelper.assert_matches_schema(msg, "HeartbeatPingPayload")
+      ProtocolHelper.refute_field(msg, "v")
     end
 
-    it "heartbeat.pong has required fields" do
+    it "heartbeat.pong has required fields and no v" do
       msg = {
         "type"      => "heartbeat.pong",
-        "v"         => 2,
         "timestamp" => Time.utc.to_unix_f,
       }
       ProtocolHelper.assert_matches_schema(msg, "HeartbeatPongPayload")
+      ProtocolHelper.refute_field(msg, "v")
     end
 
     it "heartbeat.pong with security info has required fields" do
       msg = {
         "type"             => "heartbeat.pong",
-        "v"                => 2,
         "timestamp"        => Time.utc.to_unix_f,
         "security_enabled" => true,
         "security_mode"    => "totp",
@@ -174,25 +210,28 @@ describe "Protocol Schema Conformance" do
         "extendable"       => true,
       }
       ProtocolHelper.assert_matches_schema(msg, "HeartbeatPongPayload")
+      ProtocolHelper.refute_field(msg, "v")
     end
 
-    it "session.provision has required fields" do
+    it "session.provision uses pv (not v) for the provisioning version" do
       msg = {
         "type" => "session.provision",
-        "v"    => 2,
+        "pv"   => 2,
       }
       ProtocolHelper.assert_matches_schema(msg, "SessionProvisionPayload")
+      ProtocolHelper.refute_field(msg, "v")
     end
 
     it "session.provision with all fields" do
       msg = {
         "type"            => "session.provision",
-        "v"               => 2,
+        "pv"              => 2,
         "organization_id" => "550e8400-e29b-41d4-a716-446655440000",
         "environment"     => "production",
         "nickname"        => "my-agent",
       }
       ProtocolHelper.assert_matches_schema(msg, "SessionProvisionPayload")
+      ProtocolHelper.refute_field(msg, "v")
     end
   end
 
@@ -200,7 +239,6 @@ describe "Protocol Schema Conformance" do
     it "session.created has required fields" do
       msg = {
         "type"         => "session.created",
-        "v"            => 2,
         "machine_id"   => "550e8400-e29b-41d4-a716-446655440000",
         "connected_at" => "2026-03-21T10:00:00Z",
       }
@@ -210,7 +248,6 @@ describe "Protocol Schema Conformance" do
     it "session.provisioning.created has required fields" do
       msg = {
         "type"                 => "session.provisioning.created",
-        "v"                    => 2,
         "provisioning_version" => 1,
         "connected_at"         => "2026-03-21T10:00:00Z",
         "message"              => "Connected in provisioning mode.",
@@ -221,7 +258,6 @@ describe "Protocol Schema Conformance" do
     it "command.request has required fields" do
       msg = {
         "type"       => "command.request",
-        "v"          => 2,
         "request_id" => "req_abc123",
         "command"    => "ping",
       }
@@ -231,7 +267,6 @@ describe "Protocol Schema Conformance" do
     it "error has required fields" do
       msg = {
         "type"    => "error",
-        "v"       => 2,
         "error"   => "invalid_access_key",
         "message" => "Invalid access key.",
       }
@@ -241,7 +276,6 @@ describe "Protocol Schema Conformance" do
     it "session.provisioned has required fields" do
       msg = {
         "type"            => "session.provisioned",
-        "v"               => 2,
         "machine_key"     => "genkey-agent-abc123",
         "machine_id"      => "550e8400-e29b-41d4-a716-446655440000",
         "organization_id" => "660e8400-e29b-41d4-a716-446655440000",
@@ -254,7 +288,6 @@ describe "Protocol Schema Conformance" do
     it "sync.updated has required fields" do
       msg = {
         "type"      => "sync.updated",
-        "v"         => 2,
         "commit"    => "abc123def456",
         "timestamp" => "2026-03-21T10:00:00Z",
       }

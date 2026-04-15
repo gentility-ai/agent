@@ -203,6 +203,8 @@ After editing the config, restart the agent:
 sudo systemctl restart gentility
 ```
 
+**Two-step approval (Tailscale-style).** Setting `enabled: true` in the agent config does **not** by itself make the agent an active egress route. It only advertises the capability to the server. On first sighting, the server auto-creates a route stub for this machine in a **disabled** state. An admin then has to flip that route on from the Gentility UI before any traffic actually flows through the agent. This is deliberate: a compromised or misconfigured agent cannot silently turn itself into an egress route for the org. If you've enabled egress in config but traffic isn't routing, check the route's enable toggle on the machine's edit page in Gentility.
+
 **Default-deny safety net.** Even with `enabled: true`, the agent's dialer rejects any destination that resolves to: loopback, link-local (including the cloud metadata address `169.254.169.254`), IPv4/IPv6 multicast, broadcast, the `0.0.0.0/8` wildcard range, and — unless `allow_private_networks: true` — RFC1918, CGNAT (`100.64.0.0/10`), and IPv6 ULA. IPv4-mapped IPv6 addresses (`::ffff:10.0.0.1`) are unmapped before the policy check so they cannot be used to bypass it.
 
 **When to enable each toggle:**

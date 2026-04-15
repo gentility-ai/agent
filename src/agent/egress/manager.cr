@@ -73,7 +73,6 @@ class AgentEgressManager
   private def send_opened(stream_id : String, remote_ip : String, remote_port : Int32) : Nil
     frame = {
       "type"        => "egress.stream.opened",
-      "v"           => 3,
       "stream_id"   => stream_id,
       "remote_ip"   => remote_ip,
       "remote_port" => remote_port,
@@ -84,7 +83,6 @@ class AgentEgressManager
   private def send_error(stream_id : String, code : String, message : String) : Nil
     frame = {
       "type"      => "egress.stream.error",
-      "v"         => 3,
       "stream_id" => stream_id,
       "code"      => code,
       "message"   => message,

@@ -29,7 +29,6 @@ describe AgentEgressManager do
     when json = frames.receive
       parsed = JSON.parse(json)
       parsed["type"].as_s.should eq("egress.stream.opened")
-      parsed["v"].as_i.should eq(3)
       parsed["stream_id"].as_s.should eq("stream-1")
       parsed["remote_ip"]?.try(&.as_s).should eq("127.0.0.1")
       parsed["remote_port"]?.try(&.as_i).should eq(dest_port)
@@ -68,7 +67,6 @@ describe AgentEgressManager do
     when json = frames.receive
       parsed = JSON.parse(json)
       parsed["type"].as_s.should eq("egress.stream.error")
-      parsed["v"].as_i.should eq(3)
       parsed["stream_id"].as_s.should eq("stream-2")
       parsed["code"].as_s.should eq("connect_failed")
       parsed["message"].as_s.should_not be_empty
@@ -150,7 +148,6 @@ describe AgentEgressManager do
     when data_json = frames.receive
       parsed = JSON.parse(data_json)
       parsed["type"].as_s.should eq("egress.stream.data")
-      parsed["v"].as_i.should eq(3)
       parsed["stream_id"].as_s.should eq("stream-4")
       decoded = String.new(Base64.decode(parsed["payload_b64"].as_s))
       decoded.should eq("hi there")
@@ -188,7 +185,6 @@ describe AgentEgressManager do
     when close_json = frames.receive
       parsed = JSON.parse(close_json)
       parsed["type"].as_s.should eq("egress.stream.close")
-      parsed["v"].as_i.should eq(3)
       parsed["stream_id"].as_s.should eq("stream-5")
     when timeout(2.seconds)
       fail "no close frame received"

@@ -561,7 +561,7 @@ class AgentProvisioner
 
     loop do
       # Build provision request
-      request = {"type" => "session.provision", "v" => 2} of String => (String | Int32)
+      request = {"type" => "session.provision", "pv" => 2} of String => (String | Int32)
       request["organization_id"] = selected_org_id if selected_org_id
       request["environment"] = selected_env if selected_env
       request["nickname"] = selected_nickname if selected_nickname

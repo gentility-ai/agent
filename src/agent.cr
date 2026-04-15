@@ -38,6 +38,7 @@ require "log"
 # Agent modules
 require "./agent/oauth"
 
+require "./protocol"
 require "./agent/security"
 require "./agent/crypto"
 require "./agent/config"
@@ -452,7 +453,7 @@ class GentilityAgent
           # OAuth mode: send OAuth token
           params.add "oauth_token", @oauth_token.not_nil!
         end
-        params.add "version", "2"
+        params.add "version", Protocol::CAPVER.to_s
         params.add "agent_version", VERSION
         params.add "security_mode", Security.mode
         params.add "security_enabled", (Security.mode != "none").to_s
@@ -672,7 +673,6 @@ class GentilityAgent
   private def send_egress_error(stream_id : String, code : String, message : String)
     send_message({
       "type"      => "egress.stream.error",
-      "v"         => 3,
       "stream_id" => stream_id,
       "code"      => code,
       "message"   => message,
@@ -705,7 +705,6 @@ class GentilityAgent
   private def handle_ecdh_test(msg : JSON::Any)
     Log.debug { "Received ECDH test request" }
 
-    version = msg["v"]?.try(&.as_i?) || 1
     cleartext = msg["cleartext"]?.try(&.to_s)
     ciphertext_b64 = msg["ciphertext"]?.try(&.to_s)
 
@@ -718,7 +717,6 @@ class GentilityAgent
       Log.warn { "ECDH test failed: no shared secret established" }
       send_message({
         "type"    => "ecdh_test_response",
-        "v"       => version,
         "success" => false,
         "error"   => "No shared secret established",
       })
@@ -746,7 +744,6 @@ class GentilityAgent
 
       send_message({
         "type"    => "ecdh_test_response",
-        "v"       => version,
         "success" => success,
         "iv"      => iv_b64,
         "payload" => decrypted,
@@ -755,7 +752,6 @@ class GentilityAgent
       Log.error { "ECDH test exception: #{ex.message}" }
       send_message({
         "type"    => "ecdh_test_response",
-        "v"       => version,
         "success" => false,
         "error"   => ex.message || "Decryption failed",
       })
@@ -1101,7 +1097,6 @@ class GentilityAgent
       end
     when "ecdh_test"
       # Test ECDH encryption/decryption
-      version = params.try(&.["version"]?.try(&.as_i?)) || 1
       cleartext = params.try(&.["cleartext"]?.try(&.to_s))
       ciphertext_b64 = params.try(&.["ciphertext"]?.try(&.to_s))
 
@@ -1126,14 +1121,12 @@ class GentilityAgent
         success = (decrypted == cleartext)
 
         {
-          "v"       => version,
           "success" => success,
           "iv"      => iv_b64,
           "payload" => decrypted,
         }
       rescue ex
         {
-          "v"       => version,
           "success" => false,
           "error"   => ex.message || "Decryption failed",
         }
@@ -1302,6 +1295,13 @@ class GentilityAgent
 
     # Merge security status
     status = status.merge(Security.status)
+
+    # Capver-4 egress capability advertisement. Omitted entirely when
+    # the operator has not opted in — absence means "do not consider
+    # this agent as an egress route." See protocol/capvers.md §4(a).
+    if @egress_enabled
+      status = status.merge({"egress" => {"enabled" => true}})
+    end
 
     send_message({
       "type"   => "agent.status",

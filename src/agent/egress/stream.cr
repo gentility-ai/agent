@@ -103,7 +103,6 @@ class AgentEgressStream
   private def send_data(bytes : Bytes) : Nil
     frame = {
       "type"        => "egress.stream.data",
-      "v"           => 3,
       "stream_id"   => @stream_id,
       "payload_b64" => Base64.strict_encode(bytes),
     }
@@ -113,7 +112,6 @@ class AgentEgressStream
   private def send_close : Nil
     frame = {
       "type"      => "egress.stream.close",
-      "v"         => 3,
       "stream_id" => @stream_id,
     }
     @send_frame.call(frame.to_json)
@@ -122,7 +120,6 @@ class AgentEgressStream
   private def send_error(code : String, message : String) : Nil
     frame = {
       "type"      => "egress.stream.error",
-      "v"         => 3,
       "stream_id" => @stream_id,
       "code"      => code,
       "message"   => message,
