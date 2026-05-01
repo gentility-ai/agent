@@ -181,4 +181,51 @@ describe AgentWebSocketWriter do
     server.close
     server_done.receive
   end
+
+  it "closes failed writer loops so later sends do not block forever" do
+    server = TCPServer.new("127.0.0.1", 0)
+    port = server.local_address.as(Socket::IPAddress).port
+    server_done = Channel(Nil).new
+
+    spawn do
+      client : TCPSocket? = nil
+      begin
+        client = server.accept
+        perform_server_handshake(client.not_nil!)
+        sleep 1.second
+      ensure
+        client.try(&.close) rescue nil
+        server_done.send(nil)
+      end
+    end
+
+    client_ws = AgentWebSocketConnector.open(
+      URI.parse("ws://127.0.0.1:#{port}/"),
+      connect_timeout: 1.second,
+      handshake_timeout: 1.second,
+      write_timeout: 1.second
+    )
+
+    errors = Channel(Exception).new(1)
+    writer = AgentWebSocketWriter.new(
+      client_ws,
+      send_timeout: 100.milliseconds,
+      on_error: ->(ex : Exception) { errors.send(ex) }
+    )
+
+    client_ws.close
+    writer.send("send-on-closed-websocket").should be_true
+
+    select
+    when errors.receive
+      # The important behavior is that the writer closes its channel.
+    when timeout(1.second)
+      fail "writer did not report the websocket send failure"
+    end
+
+    writer.send("after-writer-failed").should be_false
+
+    server.close
+    server_done.receive
+  end
 end

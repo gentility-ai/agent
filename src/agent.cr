@@ -306,14 +306,14 @@ class GentilityAgent
 
     while @running
       begin
-        connect
+        websocket = connect
         # Reset backoff on successful connection
         retry_count = 0
         current_backoff = base_backoff
 
         # Keep the main fiber alive while connected
         # Also independently monitor connection health (in case ping fiber is blocked)
-        while @running && @websocket && !@websocket.not_nil!.closed?
+        while @running && current_websocket?(websocket) && !websocket.closed?
           sleep 1.second
 
           # Secondary health check: if no pong received for too long, connection is dead
@@ -324,7 +324,7 @@ class GentilityAgent
             Log.warn { "Connection dead: no pong received in #{time_since_pong.total_seconds.round(0).to_i}s" }
             # Don't call close() - it writes to the socket and will block forever
             # on a half-open TCP connection. Just abandon it.
-            teardown_connection
+            teardown_connection if current_websocket?(websocket)
             break
           end
         end
@@ -386,7 +386,14 @@ class GentilityAgent
     # The ping fiber will stop naturally when @running becomes false
 
     @writer.try(&.close)
-    @websocket.try(&.close)
+
+    # Best-effort graceful close so the server sees a close frame, but
+    # bounded — HTTP::WebSocket#close writes to the socket and would
+    # otherwise hang shutdown on a half-open TCP connection.
+    if websocket = @websocket
+      @websocket = nil
+      close_websocket_with_timeout(websocket, 2.seconds)
+    end
   end
 
   def reload_security_config
@@ -399,9 +406,10 @@ class GentilityAgent
     Log.debug { message }
   end
 
-  private def connect
-    # Clean up any existing connection
-    @websocket.try(&.close) if @websocket
+  private def connect : HTTP::WebSocket
+    # Reconnecting means the prior connection is presumed dead — abandon it
+    # via teardown_connection rather than calling @websocket.close, which
+    # would write a close frame and could block on a half-open TCP socket.
     teardown_connection
     @ping_fiber = nil
 
@@ -455,7 +463,17 @@ class GentilityAgent
     end
 
     @websocket = websocket
-    @writer = AgentWebSocketWriter.new(websocket)
+    @writer = AgentWebSocketWriter.new(
+      websocket,
+      on_error: ->(ex : Exception) {
+        if current_websocket?(websocket)
+          Log.warn { "WebSocket writer failed: #{ex.class.name} - #{ex.message}" } unless @graceful_shutdown
+          teardown_connection
+        else
+          Log.debug { "Ignoring writer failure from stale websocket: #{ex.class.name} - #{ex.message}" }
+        end
+      }
+    )
     @egress_manager = build_egress_manager if @egress_enabled
 
     # Note: HTTP::WebSocket doesn't have on_error callback
@@ -468,13 +486,22 @@ class GentilityAgent
     sleep 1.second
 
     if current_websocket?(websocket) && !websocket.closed?
-      Log.info { "Connected successfully" }
-
       # Start ping mechanism
-      start_ping_loop
+      start_ping_loop(websocket)
 
       # Send initial status
-      send_status
+      unless send_status
+        teardown_connection if current_websocket?(websocket)
+        raise "Failed to send initial status"
+      end
+
+      unless send_heartbeat_ping
+        teardown_connection if current_websocket?(websocket)
+        raise "Failed to send initial heartbeat"
+      end
+
+      Log.info { "Connected successfully" }
+      websocket
     else
       raise "Failed to establish WebSocket connection"
     end
@@ -1248,7 +1275,7 @@ class GentilityAgent
     })
   end
 
-  private def send_status
+  private def send_status : Bool
     status = {
       "agent_version" => VERSION,
       "hostname"      => get_hostname,
@@ -1276,6 +1303,7 @@ class GentilityAgent
     })
   rescue ex : Exception
     Log.error { "Error sending status: #{ex.message}" }
+    false
   end
 
   private def get_hostname : String
@@ -1336,7 +1364,7 @@ class GentilityAgent
     "unknown"
   end
 
-  private def start_ping_loop
+  private def start_ping_loop(websocket : HTTP::WebSocket)
     # Reset ping tracking state for new connection
     @last_pong_received = Time.instant
     @last_ping_sent = Time.instant
@@ -1345,11 +1373,11 @@ class GentilityAgent
     @ping_fiber = spawn do
       begin
         loop do
-          break unless @running && @websocket && !@websocket.not_nil!.closed?
+          break unless @running && current_websocket?(websocket) && !websocket.closed?
 
           sleep PING_INTERVAL
 
-          break unless @running && @websocket && !@websocket.not_nil!.closed?
+          break unless @running && current_websocket?(websocket) && !websocket.closed?
 
           # Check if previous ping timed out (no pong received)
           if @ping_in_flight
@@ -1357,7 +1385,7 @@ class GentilityAgent
             if time_since_ping > PONG_TIMEOUT
               Log.warn { "Pong timeout: no response in #{time_since_ping.total_seconds.round(1)}s - connection presumed dead" }
               # Don't call close() - blocks on half-open connections
-              teardown_connection
+              teardown_connection if current_websocket?(websocket)
               break
             else
               # Still waiting for pong, don't send another ping yet
@@ -1366,16 +1394,13 @@ class GentilityAgent
             end
           end
 
-          @last_ping_sent = Time.instant
-          @ping_in_flight = true
-          send_message({"type" => "heartbeat.ping", "timestamp" => Time.utc.to_unix_f})
-          Log.debug { "Sent ping" }
+          Log.debug { "Sent ping" } if send_heartbeat_ping
         end
       rescue ex : Exception
         Log.error { "Connection monitor crashed: #{ex.class.name} - #{ex.message}" }
       ensure
         # If ping loop exits unexpectedly, signal main loop to reconnect
-        unless @graceful_shutdown
+        if !@graceful_shutdown && current_websocket?(websocket)
           Log.warn { "Connection monitor exited, triggering reconnect" }
           # Don't call close() - blocks on half-open connections
           teardown_connection
@@ -1410,12 +1435,42 @@ class GentilityAgent
     !!(current && current.same?(websocket))
   end
 
+  private def current_writer?(writer : AgentWebSocketWriter) : Bool
+    current = @writer
+    !!(current && current.same?(writer))
+  end
+
+  private def send_heartbeat_ping : Bool
+    @last_ping_sent = Time.instant
+    @ping_in_flight = true
+    send_message({"type" => "heartbeat.ping", "timestamp" => Time.utc.to_unix_f})
+  end
+
   private def teardown_connection
     @egress_manager.try(&.close_all)
     @egress_manager = nil
     @writer.try(&.close)
     @writer = nil
     @websocket = nil
+  end
+
+  private def close_websocket_with_timeout(websocket : HTTP::WebSocket, timeout_span : Time::Span) : Nil
+    done = Channel(Nil).new(1)
+    spawn do
+      begin
+        websocket.close unless websocket.closed?
+      rescue ex : Exception
+        Log.debug { "Error closing websocket: #{ex.class.name} - #{ex.message}" }
+      ensure
+        done.send(nil)
+      end
+    end
+
+    select
+    when done.receive
+    when timeout(timeout_span)
+      Log.debug { "Abandoning websocket close after #{timeout_span.total_seconds.round(1)}s" }
+    end
   end
 
   # Construct an egress manager wired to the current websocket writer.
@@ -1426,7 +1481,7 @@ class GentilityAgent
       writer = @writer
       if writer
         Log.debug { "→ Sending egress frame (#{json.size} bytes)" }
-        writer.send(json)
+        teardown_connection if !writer.send(json) && current_writer?(writer)
       end
       nil
     }
@@ -1438,15 +1493,21 @@ class GentilityAgent
   end
 
   # Helper method to send a message as JSON
-  private def send_message(data : Hash)
+  private def send_message(data : Hash) : Bool
     debug_log("→ Sending: #{data.inspect}")
 
     writer = @writer
-    return unless writer
+    return false unless writer
 
     json = data.to_json
     Log.debug { "→ Sending JSON message (#{json.size} bytes)" }
-    writer.send(json)
+    unless writer.send(json)
+      Log.warn { "Failed to queue WebSocket message, forcing reconnect" } unless @graceful_shutdown
+      teardown_connection if current_writer?(writer)
+      return false
+    end
+
+    true
   end
 
   # Advertise available credentials to the server
