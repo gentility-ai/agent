@@ -48,12 +48,53 @@ fetch-release:
     echo "✅ Downloaded release artifacts for ${tag}:"
     ls -lh "packages/{{binary_name}}"*"${current_version}"* 2>/dev/null || true
 
-# Chains fetch-release -> repo-add-all -> deploy-packages. Refreshes
-# CI artifacts, adds every arch to the aptly repo, rsyncs ./public/ to
-# packages.gentility.ai via ansible, and reloads nginx. Expects the
+# Verifies each downloaded tarball's binary contains the expected
+# "Gentility AI Agent v<VERSION>" marker. Catches the case where CI
+# built from a stale tree and the baked-in version drifts from VERSION.
+verify-release-version:
+    #!/bin/bash
+    set -e
+    expected="{{version}}"
+    echo "🔍 Verifying release artifacts contain v${expected}..."
+    tmp=$(mktemp -d)
+    trap "rm -rf '$tmp'" EXIT
+    shopt -s nullglob
+    tarballs=(packages/{{binary_name}}-${expected}-*.tar.gz)
+    if [ ${#tarballs[@]} -eq 0 ]; then
+        echo "❌ No tarballs found in packages/ for v${expected}."
+        echo "   Run 'just fetch-release' first."
+        exit 1
+    fi
+    fail=0
+    for tarball in "${tarballs[@]}"; do
+        binary=$(tar -tzf "$tarball" | grep -v '/$' | head -1)
+        tar -xzf "$tarball" -C "$tmp"
+        found=$(strings "$tmp/$binary" 2>/dev/null | grep -F "Gentility AI Agent v${expected}" | head -1 || true)
+        if [ -z "$found" ]; then
+            echo "❌ ${tarball}: missing 'Gentility AI Agent v${expected}'"
+            mismatch=$(strings "$tmp/$binary" 2>/dev/null | grep -E "Gentility AI Agent v[0-9]+\.[0-9]+\.[0-9]+" | head -1 || true)
+            [ -n "$mismatch" ] && echo "   found instead: ${mismatch}"
+            fail=1
+        else
+            echo "✅ $(basename "$tarball"): ${found}"
+        fi
+    done
+    if [ "$fail" -ne 0 ]; then
+        echo ""
+        echo "❌ Release artifact version mismatch — refusing to publish."
+        echo "   The CI build does not match VERSION (${expected})."
+        echo "   Likely the workflow built a stale tree. Re-run the build for tag v${expected}."
+        exit 1
+    fi
+    echo "✅ All release artifacts contain v${expected}"
+
+# Chains fetch-release -> verify-release-version -> repo-add-all ->
+# deploy-packages. Refreshes CI artifacts, asserts the binary version
+# matches VERSION, adds every arch to the aptly repo, rsyncs ./public/
+# to packages.gentility.ai via ansible, and reloads nginx. Expects the
 # GitHub Release to already exist and SSH access to the packages server.
 # End-to-end publish of the current VERSION to packages.gentility.ai
-publish: fetch-release repo-add-all deploy-packages
+publish: fetch-release verify-release-version repo-add-all deploy-packages
     @echo ""
     @echo "✅ v{{version}} published to https://packages.gentility.ai"
 
@@ -336,6 +377,9 @@ release type="patch":
     echo ""
     echo "📥 Fetching release artifacts..."
     just fetch-release
+
+    echo ""
+    just verify-release-version
 
     echo ""
     echo "✅ Release v${current_version} built and fetched."
