@@ -534,9 +534,19 @@ class AgentProvisioner
     # Connect to WebSocket
     connect_websocket
 
-    # Wait for session.provisioning.created
+    # Wait for session.provisioning.created. The server may instead send an
+    # `error` frame here (e.g. an invalid/expired token rejected at connect
+    # time) — recognise it and exit cleanly rather than crashing with an
+    # unhandled exception.
     msg = wait_for_message(10.seconds)
-    unless msg["type"]?.try(&.to_s) == "session.provisioning.created"
+    case msg["type"]?.try(&.to_s)
+    when "session.provisioning.created"
+      # Connected in provisioning mode — continue below.
+    when "error"
+      report_provisioning_error(msg)
+      @websocket.try(&.close)
+      return
+    else
       raise "Expected session.provisioning.created, got: #{msg["type"]?}"
     end
 
@@ -600,22 +610,43 @@ class AgentProvisioner
         @websocket.try(&.close)
         break
       when "error"
-        error_type = response["error"]?.try(&.to_s) || "unknown_error"
-        error_msg = response["message"]?.try(&.to_s) || "Unknown error"
-
-        puts ""
-        puts "❌ Provisioning failed: #{error_type}"
-        puts "   #{error_msg}"
-        puts ""
-        puts "This is a server-side error. Please contact support if the issue persists."
-        puts ""
-
+        report_provisioning_error(response)
         @websocket.try(&.close)
         return
       else
         raise "Unexpected response type: #{response["type"]?}"
       end
     end
+  end
+
+  # Render a server `error` frame for the user without crashing.
+  #
+  # The server's error shape is stable:
+  #   {"type": "error", "error": "<code>", "message": "<human text>"}
+  # where <code> is a machine-readable reason such as "invalid_token",
+  # "token_expired", "unsupported_protocol", or a provisioning-step error.
+  private def report_provisioning_error(response : JSON::Any)
+    error_type = response["error"]?.try(&.to_s) || "unknown_error"
+    error_msg = response["message"]?.try(&.to_s) || "Unknown error"
+
+    puts ""
+    puts "❌ Provisioning failed: #{error_type}"
+    puts "   #{error_msg}"
+    puts ""
+
+    case error_type
+    when "invalid_token", "token_expired"
+      puts "Your authentication token is invalid or has expired."
+      puts "Re-authenticate and try again:"
+      puts ""
+      puts "  gentility auth"
+    when "unsupported_protocol"
+      puts "This agent is too old for the server. Please upgrade the agent and try again."
+    else
+      puts "This is a server-side error. Please contact support if the issue persists."
+    end
+
+    puts ""
   end
 
   private def connect_websocket
