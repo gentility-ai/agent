@@ -346,7 +346,7 @@ See [docs/SECURITY_RATE_LIMITING.md](docs/SECURITY_RATE_LIMITING.md) for details
 For support, issues, or feature requests:
 
 - **GitHub Issues**: [Create an issue](https://github.com/gentility-ai/agent/issues)
-- **Documentation**: [docs.gentility.ai](https://docs.gentility.ai)
+- **Documentation**: [gentility.ai/docs/getting-started](https://gentility.ai/docs/getting-started)
 - **Email**: support@gentility.ai
 
 ## License
