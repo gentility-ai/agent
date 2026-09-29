@@ -216,16 +216,20 @@ describe "Protocol Schema Conformance" do
     it "session.provision uses pv (not v) for the provisioning version" do
       msg = {
         "type" => "session.provision",
-        "pv"   => 2,
+        "pv"   => Protocol::PROVISIONING_VERSION,
       }
       ProtocolHelper.assert_matches_schema(msg, "SessionProvisionPayload")
       ProtocolHelper.refute_field(msg, "v")
     end
 
+    it "provisions at the version the server accepts" do
+      Protocol::PROVISIONING_VERSION.should eq(1)
+    end
+
     it "session.provision with all fields" do
       msg = {
         "type"            => "session.provision",
-        "pv"              => 2,
+        "pv"              => Protocol::PROVISIONING_VERSION,
         "organization_id" => "550e8400-e29b-41d4-a716-446655440000",
         "environment"     => "production",
         "nickname"        => "my-agent",

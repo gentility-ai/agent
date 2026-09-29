@@ -9,4 +9,10 @@
 # repo for the canonical history.
 module Protocol
   CAPVER = 4
+
+  # The provisioning protocol's own version, sent as `pv` on every
+  # `session.provision`. It is NOT capver and NOT the v2 message
+  # namespace: the server refuses any value but the one it advertises as
+  # `provisioning_version` on `session.provisioning.created`.
+  PROVISIONING_VERSION = 1
 end
