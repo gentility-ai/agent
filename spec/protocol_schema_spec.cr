@@ -8,7 +8,7 @@ require "yaml"
 # This is not full JSON Schema validation — it's a sanity check that the
 # agent and spec stay in sync.
 
-SPEC_PATH = File.join(__DIR__, "..", "..", "root", "protocol", "agent-protocol.asyncapi.yaml")
+SPEC_PATH = File.join(__DIR__, "..", "..", "gentility", "protocol", "agent-protocol.asyncapi.yaml")
 
 module ProtocolHelper
   # Load and cache the spec
