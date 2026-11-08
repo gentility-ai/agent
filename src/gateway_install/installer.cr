@@ -43,6 +43,9 @@ module GatewayInstaller
   # contract/key_prefixes.json): its key scope refuses a key with none of them.
   KEY_PREFIXES  = {"omp_", "claude_", "codex_"}
   CANARY_WITHIN = 20.seconds
+  # The first plugin version with a key scope; a move to an older one is not
+  # asked to show it.
+  SCOPED_FROM = {0, 5, 0}
 
   class Refused < Exception
   end
@@ -366,7 +369,8 @@ module GatewayInstaller
     private def attempt(move_id : String, url : String, sha256 : String) : Answer
       previous = current
       canary, manifest = begin
-        {read_canary, fetch_and_verify(url, sha256, staging(move_id))}
+        verified = fetch_and_verify(url, sha256, staging(move_id))
+        {scoped?(verified.plugin_version) ? read_canary : nil, verified}
       rescue ex : Refused
         return Answer.new(move_id, "refused", ex.message.to_s, previous, previous)
       rescue ex
@@ -388,23 +392,25 @@ module GatewayInstaller
         install_beside(manifest, staging(move_id), kept)
         switch(manifest)
         restart_and_check(manifest.plugin_id, manifest.plugin_version) ||
-        scope_fault(canary).try { |fault| "the key scope is not live: #{fault}" }
+        canary.try { |canary| scope_fault(canary).try { |fault| "the key scope is not live: #{fault}" } }
       rescue ex
         "install failed: #{ex.message}"
       end
-      return Answer.new(move_id, "moved", "", manifest.running.copy_with(key_scope: "live"), previous, "live") unless reason
+      scope = canary ? "live" : "absent"
+      return Answer.new(move_id, "moved", "", manifest.running.copy_with(key_scope: scope), previous, scope) unless reason
 
       # 7. Roll back.
-      roll_back(move_id, kept, manifest.plugin_id, previous, reason, canary)
+      roll_back(move_id, kept, manifest.plugin_id, previous, reason)
     end
 
     # Puts back what was kept and checks the previous version. When that fails
     # too, nothing known runs: the answer's `running` is null. Without
     # `restart`, the proxy is not running (boot): systemd starts it later.
     # The previous version need not have a live key scope; the answer says
-    # whether it was seen live, which at boot it is not.
+    # whether it was seen live, which at boot, or without a canary in the
+    # restored config.yaml, it is not.
     private def roll_back(move_id : String, kept : Array({String, String?}), plugin_id : String,
-                          previous : Running?, reason : String, canary : Canary?, restart = true) : Answer
+                          previous : Running?, reason : String, restart = true) : Answer
       kept.each do |target, copy|
         if copy
           raise "the kept copy of #{target} is gone" unless @tree.copy(copy, target)
@@ -419,6 +425,7 @@ module GatewayInstaller
       if again = restart_and_check(plugin_id, previous.try(&.plugin_version))
         return Answer.new(move_id, "rolled_back", "#{reason}; the previous version failed its check too: #{again}", nil, previous, "absent")
       end
+      canary = read_canary rescue nil
       scope = canary && scope_fault(canary).nil? ? "live" : "absent"
       Answer.new(move_id, "rolled_back", reason, previous.try(&.copy_with(key_scope: scope)), previous, scope)
     end
@@ -431,8 +438,7 @@ module GatewayInstaller
       marker = Marker.from_json(json)
       unless @tree.exists?(record_path(marker.move_id))
         restart = !at_boot || (@system.unit_state.try(&.first) || 0) > 0
-        canary = read_canary rescue nil
-        answer = roll_back(marker.move_id, marker.kept, marker.plugin_id, marker.previous, "interrupted", canary, restart)
+        answer = roll_back(marker.move_id, marker.kept, marker.plugin_id, marker.previous, "interrupted", restart)
       end
       finish(marker.move_id, answer)
       answer
@@ -642,6 +648,15 @@ module GatewayInstaller
       type ? "#{status} #{type}" : status.to_s
     end
 
+    # Whether a plugin version has the key scope. One that cannot be read is
+    # taken to have it, so its move must show it.
+    private def scoped?(version : String) : Bool
+      semver = SemanticVersion.parse(version)
+      {semver.major, semver.minor, semver.patch} >= SCOPED_FROM
+    rescue ArgumentError
+      true
+    end
+
     # The canary as config.yaml sets it up, read before the host changes: a
     # move whose key scope could not be shown live is not tried.
     private def read_canary : Canary
@@ -650,7 +665,7 @@ module GatewayInstaller
       keys = (config.dig?("access", "api-keys") || config["api-keys"]?).try(&.as_a?) || [] of YAML::Any
       sentinels = keys.compact_map(&.as_s?).reject { |key| KEY_PREFIXES.any? { |prefix| key.starts_with?(prefix) } }
       unless sentinels.size == 1
-        raise Refused.new("access.api-keys holds #{sentinels.size} keys without a harness prefix, not the one sentinel")
+        raise Refused.new("access.api-keys has #{sentinels.size} keys without a harness prefix; expected exactly one, the sentinel")
       end
       providers = (config.dig?("api-keys", "openai-compatibility") || config["openai-compatibility"]?).try(&.as_a?) || [] of YAML::Any
       model = providers.compact_map { |provider| served_model(provider) }.first? ||

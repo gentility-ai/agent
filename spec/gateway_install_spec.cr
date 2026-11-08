@@ -182,7 +182,8 @@ end
 
 # A bundle as the packaging repo would build it, with knobs to spoil it.
 def bundle(key : Ed25519::SigningKey,
-           plugin = "plugin 0.2.0",
+           plugin_version = "0.5.0",
+           plugin = "plugin #{plugin_version}",
            kind = "gateway",
            format = 1,
            signing_key = key,
@@ -195,10 +196,10 @@ def bundle(key : Ed25519::SigningKey,
   manifest = {
     "kind"     => kind,
     "format"   => format,
-    "bundle"   => "#{upstream}-0.2.0",
+    "bundle"   => "#{upstream}-#{plugin_version}",
     "upstream" => {"repo" => "router-for-me/CLIProxyAPI", "version" => upstream,
                    "archive" => "CLIProxyAPI_#{upstream}_linux_amd64.tar.gz", "sha256" => sha256(archive)},
-    "plugin" => {"id" => "gentility-usage", "version" => "0.2.0", "commit" => "abc",
+    "plugin" => {"id" => "gentility-usage", "version" => plugin_version, "commit" => "abc",
                  "file" => "gentility-usage.so", "sha256" => sha256(plugin)},
     "unknown_field" => "ignored",
   }.to_json
@@ -254,14 +255,14 @@ describe GatewayInstaller::Installer do
       status.should eq(0)
       answer["result"].should eq("moved")
       answer["reason"].should eq("")
-      answer["running"].should eq(JSON.parse(%({"bundle":"8.0.60-0.2.0","upstream_version":"8.0.60","plugin_version":"0.2.0","key_scope":"live"})))
+      answer["running"].should eq(JSON.parse(%({"bundle":"8.0.60-0.5.0","upstream_version":"8.0.60","plugin_version":"0.5.0","key_scope":"live"})))
       answer["key_scope"].should eq("live")
       answer["previous"]["bundle"].should eq("8.0.47-0.1.0")
 
       File.read(root + GatewayInstaller::DROP_IN).should contain("ExecStart=/opt/cliproxyapi/8.0.60/cli-proxy-api -config")
       File.read(root + "/opt/cliproxyapi/8.0.60/cli-proxy-api").should eq("proxy 8.0.60")
       File.read(root + "/opt/cliproxyapi/8.0.47/cli-proxy-api").should eq("proxy 8.0.47")
-      File.read("#{root}#{GatewayInstaller::PLUGIN_DIR}/gentility-usage.so").should eq("plugin 0.2.0")
+      File.read("#{root}#{GatewayInstaller::PLUGIN_DIR}/gentility-usage.so").should eq("plugin 0.5.0")
       File.read("#{root}/var/lib/gentility-gateway/previous/2").should eq("plugin 0.1.0")
       JSON.parse(File.read(root + GatewayInstaller::CURRENT)).should eq(answer["running"])
       JSON.parse(File.read("#{root}/var/lib/gentility-gateway/moves/#{MOVE}.json")).should eq(answer)
@@ -295,7 +296,7 @@ describe GatewayInstaller::Installer do
       _, answer = install(installer, system, bundle(key, plugin: "broken"))
 
       answer["result"].should eq("rolled_back")
-      answer["reason"].as_s.should start_with("plugin gentility-usage 0.2.0 did not register")
+      answer["reason"].as_s.should start_with("plugin gentility-usage 0.5.0 did not register")
       answer["reason"].as_s.should_not contain("previous version failed")
       answer["running"]["bundle"].should eq("8.0.47-0.1.0")
       system.restarts.should eq(2)
@@ -447,7 +448,7 @@ describe GatewayInstaller::Installer do
     it "asks only the previous version when the new one fails its check" do
       with_host do |root, key, system, installer|
         _, answer = install(installer, system, bundle(key, plugin: "broken"))
-        answer["reason"].as_s.should start_with("plugin gentility-usage 0.2.0 did not register")
+        answer["reason"].as_s.should start_with("plugin gentility-usage 0.5.0 did not register")
         system.canaries.size.should eq(1)
       end
     end
@@ -460,11 +461,10 @@ describe GatewayInstaller::Installer do
         it what do
           with_host do |root, key, system, installer|
             File.write(root + GatewayInstaller::CONFIG, CONFIG.sub(SENTINEL_LINE, lines))
-            reason = "access.api-keys holds #{count} keys without a harness prefix, not the one sentinel"
+            reason = "access.api-keys has #{count} keys without a harness prefix; expected exactly one, the sentinel"
             _, answer = install(installer, system, bundle(key))
             answer["result"].should eq("refused")
             answer["reason"].should eq(reason)
-            system.fetches.should eq(0)
             host_unchanged(root, system)
           end
         end
@@ -476,6 +476,46 @@ describe GatewayInstaller::Installer do
           _, answer = install(installer, system, bundle(key))
           answer["reason"].should eq("config.yaml names no openai-compatibility model")
           host_unchanged(root, system)
+        end
+      end
+    end
+
+    describe "is not asked of a target plugin older than 0.5.0, which has no scope:" do
+      it "it moves, answering absent, whatever the proxy would answer" do
+        with_host do |root, key, system, installer|
+          system.canary_answer = ->(_n : Int32) { {200, "{}"}.as({Int32, String}?) }
+          _, answer = install(installer, system, bundle(key, plugin_version: "0.4.0"))
+          answer["result"].should eq("moved")
+          answer["key_scope"].should eq("absent")
+          answer["running"]["key_scope"].should eq("absent")
+          JSON.parse(File.read(root + GatewayInstaller::CURRENT))["key_scope"].should eq("absent")
+          system.canaries.should be_empty
+        end
+      end
+
+      it "it moves on a config.yaml without the one sentinel, as hosts have before prefixed keys" do
+        with_host do |root, key, system, installer|
+          File.write(root + GatewayInstaller::CONFIG, CONFIG.sub(SENTINEL_LINE, "#{SENTINEL_LINE}    - other\n"))
+          _, answer = install(installer, system, bundle(key, plugin_version: "0.4.0"))
+          answer["result"].should eq("moved")
+          answer["key_scope"].should eq("absent")
+        end
+      end
+
+      it "while 0.5.0 on that config.yaml is refused" do
+        with_host do |root, key, system, installer|
+          File.write(root + GatewayInstaller::CONFIG, CONFIG.sub(SENTINEL_LINE, "#{SENTINEL_LINE}    - other\n"))
+          _, answer = install(installer, system, bundle(key, plugin_version: "0.5.0"))
+          answer["result"].should eq("refused")
+          host_unchanged(root, system)
+        end
+      end
+
+      it "while a later version is asked, and rolls back on 200" do
+        with_host do |root, key, system, installer|
+          system.canary_answer = ->(_n : Int32) { {200, "{}"}.as({Int32, String}?) }
+          _, answer = install(installer, system, bundle(key, plugin_version: "0.10.0"))
+          answer["reason"].should eq("the key scope is not live: 200")
         end
       end
     end
@@ -580,7 +620,7 @@ describe GatewayInstaller::Installer do
         begin
           FileUtils.cp(cut + GatewayInstaller::MARKER, root + GatewayInstaller::MARKER)
           File.delete("#{root}/var/lib/gentility-gateway/moves/#{MOVE}.json")
-          JSON.parse(File.read(root + GatewayInstaller::CURRENT))["bundle"].should eq("8.0.60-0.2.0")
+          JSON.parse(File.read(root + GatewayInstaller::CURRENT))["bundle"].should eq("8.0.60-0.5.0")
 
           _, later = install(installer, system, bundle(key, plugin: "broken"), move: "019a5b2c-0000-7000-8000-000000000002")
           JSON.parse(File.read("#{root}/var/lib/gentility-gateway/moves/#{MOVE}.json"))["reason"].should eq("interrupted")
