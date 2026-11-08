@@ -32,6 +32,16 @@ if [ ! -f /etc/gentility.yaml ]; then
     chown gentility:gentility /etc/gentility.yaml
 fi
 
+# The gateway helper's sudoers line goes live only once visudo accepts it.
+GATEWAY_SUDOERS="/usr/lib/gentility-agent/gentility-gateway.sudoers"
+if [ -f "$GATEWAY_SUDOERS" ] && command -v visudo >/dev/null 2>&1; then
+    if visudo -cf "$GATEWAY_SUDOERS" >/dev/null; then
+        install -m 0440 -o root -g root "$GATEWAY_SUDOERS" /etc/sudoers.d/gentility-gateway
+    else
+        echo "Warning: $GATEWAY_SUDOERS failed visudo -c; gateway installs stay off." >&2
+    fi
+fi
+
 # Offer sudo configuration if running interactively
 MANAGE_SUDO="/usr/lib/gentility-agent/manage-sudo.sh"
 if [ -t 0 ] && [ -f "$MANAGE_SUDO" ] && [ ! -f /etc/sudoers.d/gentility ]; then

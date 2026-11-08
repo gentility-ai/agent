@@ -79,6 +79,30 @@ contents:
       owner: root
       group: root
 
+  # Gateway bundle installer: the root helper, the keys it trusts, and the
+  # sudoers line that lets the agent run it (installed by postinstall once
+  # visudo -c passes). See the gateway bundle contract.
+  - src: ./bin/gentility-gateway-install
+    dst: /usr/libexec/gentility/gentility-gateway-install
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+
+  - src: ./configs/gateway/keys.json
+    dst: /etc/gentility-gateway/keys.json
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
+  - src: ./configs/gateway/sudoers
+    dst: /usr/lib/gentility-agent/gentility-gateway.sudoers
+    file_info:
+      mode: 0440
+      owner: root
+      group: root
+
 scripts:
   preinstall: ./scripts/preinstall.sh
   postinstall: ./scripts/postinstall.sh

@@ -66,6 +66,19 @@ jobs:
             --no-debug \
             -o bin/gentility-agent
 
+      - name: Build gateway install helper
+        if: matrix.arch == 'amd64'
+        run: |
+          crystal build src/gateway_install.cr \
+            --release \
+            --static \
+            --no-debug \
+            -o bin/gentility-gateway-install
+
+      - name: Gateway specs
+        if: matrix.arch == 'amd64'
+        run: crystal spec spec/gateway_install_spec.cr spec/gateway_spec.cr
+
       - name: Install nfpm
         env:
           NFPM_VERSION: 2.48.0
