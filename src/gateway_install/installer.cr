@@ -35,6 +35,10 @@ module GatewayInstaller
   CONFIG     = "/var/lib/cliproxyapi/config.yaml"
   PLUGIN_DIR = "/var/lib/cliproxyapi/plugins/linux/amd64"
   UNIT       = "cliproxyapi"
+  CONFIG_MAX = 1024_i64 * 1024
+  # The boot unit's word: put back what a cut-off move left, before the proxy starts.
+  RECOVER = "--recover"
+  WATCHER = "file watcher started for config and auth directory changes"
 
   class Refused < Exception
   end
@@ -113,9 +117,19 @@ module GatewayInstaller
     end
   end
 
+  # Where the helper runs: in its move's own unit, outside any unit (from the
+  # agent, through sudo), or somewhere it cannot tell.
+  enum Placement
+    Isolated
+    Outside
+    Unknown
+  end
+
   # What the helper asks of the host, behind a seam so tests run without root.
   abstract class System
-    abstract def isolated?(move_id : String) : Bool
+    STARTED = Time.instant
+
+    abstract def placement(move_id : String) : Placement
     abstract def isolate(args : Array(String)) : {Int32, String}
     abstract def fetch(url : String, dest : String) : Nil
     abstract def daemon_reload : Bool
@@ -129,6 +143,11 @@ module GatewayInstaller
       Time.utc
     end
 
+    # A monotonic clock, for deadlines.
+    def ticks : Time::Span
+      Time.instant - STARTED
+    end
+
     def sleep(span : Time::Span) : Nil
       ::sleep(span)
     end
@@ -140,12 +159,17 @@ module GatewayInstaller
     MAX_BUNDLE   = 512_i64 * 1024 * 1024
     FETCH_WITHIN = 10.minutes
 
-    # Whether this helper runs in its move's own unit, which systemd made, and
-    # not in the agent's service, whose restart would kill it midway.
-    def isolated?(move_id : String) : Bool
-      File.read("/proc/self/cgroup").matches?(%r{^0::/system\.slice/#{MOVE_UNIT}#{move_id}-[0-9a-f]{8}\.service$}m)
+    # Isolated in its move's own unit, which systemd made, and not in the
+    # agent's service, whose restart would kill it midway. Without a cgroup v2
+    # line it cannot tell; inside some other unit (sudo strips INVOCATION_ID,
+    # so not the agent's), another systemd-run would only nest.
+    def placement(move_id : String) : Placement
+      line = File.read("/proc/self/cgroup").lines.find(&.starts_with?("0::"))
+      return Placement::Unknown unless line
+      return Placement::Isolated if line.matches?(%r{\A0::/system\.slice/#{MOVE_UNIT}#{move_id}-[0-9a-f]{8}\.service\z})
+      ENV["INVOCATION_ID"]? ? Placement::Unknown : Placement::Outside
     rescue File::Error
-      false
+      Placement::Unknown
     end
 
     # Runs the move again in a unit of its own. Killing this process (the
@@ -155,7 +179,7 @@ module GatewayInstaller
       status = Process.run("/usr/bin/systemd-run",
         ["--wait", "--pipe", "--collect", "--quiet", "--unit=#{MOVE_UNIT}#{args[0]}-#{Random::Secure.hex(4)}", SELF] + args,
         output: output, error: Process::Redirect::Inherit)
-      {status.exit_code, output.to_s}
+      {status.exit_code? || 1, output.to_s}
     end
 
     def fetch(url : String, dest : String) : Nil
@@ -239,17 +263,27 @@ module GatewayInstaller
 
     # Answers with an exit status and the answer's JSON.
     def run(args : Array(String)) : {Int32, String}
+      return {0, with_lock { recover(at_boot: true).try(&.to_json) || "" }} if args == [RECOVER]
       unless args.size == 3 && args[0].matches?(MOVE_ID) && args[1].matches?(BUNDLE_URL) && args[2].matches?(SHA256)
         return {2, Answer.new(nil, "refused", "bad arguments", current, current).to_json}
       end
       move_id, url, sha256 = args
-      return @system.isolate(args) unless @system.isolated?(move_id)
+      case @system.placement(move_id)
+      in .outside?
+        return isolate(args)
+      in .unknown?
+        return {1, Answer.new(move_id, "refused", "cannot tell whether the helper runs in a unit of its own", current, current).to_json}
+      in .isolated?
+      end
 
-      prepare_dirs
-      File.open(at("#{STATE}/lock"), "w") do |lock|
-        lock.flock_exclusive
+      with_lock do
         begin
           recover
+        rescue ex
+          reason = "a cut-off move could not be put back, so this one was not tried: #{ex.message}"
+          return {1, Answer.new(move_id, "refused", reason, nil, current).to_json}
+        end
+        begin
           # 1. Repeat move.
           if record = @tree.read(record_path(move_id))
             return {0, record}
@@ -268,6 +302,20 @@ module GatewayInstaller
       Running.from_json(File.read(at(CURRENT))) if File.exists?(at(CURRENT))
     rescue JSON::ParseException | JSON::SerializableError
       nil
+    end
+
+    private def with_lock(&)
+      prepare_dirs
+      File.open(at("#{STATE}/lock"), "w") do |lock|
+        lock.flock_exclusive
+        yield
+      end
+    end
+
+    private def isolate(args : Array(String)) : {Int32, String}
+      @system.isolate(args)
+    rescue ex
+      {1, Answer.new(args[0], "refused", "could not start the move unit: #{ex.message}", current, current).to_json}
     end
 
     private def attempt(move_id : String, url : String, sha256 : String) : Answer
@@ -293,9 +341,7 @@ module GatewayInstaller
       reason = begin
         install_beside(manifest, staging(move_id), kept)
         switch(manifest)
-        failed = restart_and_check(manifest.plugin_id, manifest.plugin_version)
-        @tree.write(CURRENT, manifest.running.to_json, Owner.root(0o644)) unless failed
-        failed
+        restart_and_check(manifest.plugin_id, manifest.plugin_version)
       rescue ex
         "install failed: #{ex.message}"
       end
@@ -306,15 +352,20 @@ module GatewayInstaller
     end
 
     # Puts back what was kept and checks the previous version. When that fails
-    # too, nothing known runs: the answer's `running` is null.
+    # too, nothing known runs: the answer's `running` is null. Without
+    # `restart`, the proxy is not running (boot): systemd starts it later.
     private def roll_back(move_id : String, kept : Array({String, String?}), plugin_id : String,
-                          previous : Running?, reason : String) : Answer
+                          previous : Running?, reason : String, restart = true) : Answer
       kept.each do |target, copy|
         if copy
           raise "the kept copy of #{target} is gone" unless @tree.copy(copy, target)
         else
           @tree.delete(target)
         end
+      end
+      unless restart
+        return Answer.new(move_id, "rolled_back", reason, previous, previous) if @system.daemon_reload
+        return Answer.new(move_id, "rolled_back", "#{reason}; daemon-reload failed", nil, previous)
       end
       if again = restart_and_check(plugin_id, previous.try(&.plugin_version))
         return Answer.new(move_id, "rolled_back", "#{reason}; the previous version failed its check too: #{again}", nil, previous)
@@ -323,18 +374,29 @@ module GatewayInstaller
     end
 
     # A move cut off midway (a crash, a reboot) left its marker: put the
-    # previous version back and record the move as interrupted.
-    private def recover : Nil
+    # previous version back and record the move as interrupted. At boot the
+    # proxy has not started unless something started it by hand.
+    private def recover(at_boot = false) : Answer?
       return unless json = @tree.read(MARKER)
       marker = Marker.from_json(json)
       unless @tree.exists?(record_path(marker.move_id))
-        answer = roll_back(marker.move_id, marker.kept, marker.plugin_id, marker.previous, "interrupted")
+        restart = !at_boot || (@system.unit_state.try(&.first) || 0) > 0
+        answer = roll_back(marker.move_id, marker.kept, marker.plugin_id, marker.previous, "interrupted", restart)
       end
       finish(marker.move_id, answer)
+      answer
     end
 
-    # 8. Record.
+    # 8. Record: what runs, then the answer. A move cut off between the two
+    # is rolled back by the next run, which writes both again.
     private def finish(move_id : String, answer : Answer?) : Nil
+      if answer && answer.result != "refused"
+        if running = answer.running
+          @tree.write(CURRENT, running.to_json, Owner.root(0o644))
+        else
+          @tree.delete(CURRENT)
+        end
+      end
       @tree.write(record_path(move_id), answer.to_json, Owner.root(0o644)) if answer
       @tree.delete(MARKER)
       FileUtils.rm_rf(staging(move_id))
@@ -439,10 +501,10 @@ module GatewayInstaller
       File.chmod(previous, 0o700)
       staged = sha256_of(File.join(dir, "cli-proxy-api"))
       paths = [DROP_IN, CONFIG, manifest.plugin]
-      paths << manifest.proxy unless @tree.read(manifest.proxy) { |io| io && sha256_of(io) == staged }
-      paths.each do |path|
-        copy = "#{STATE}/previous/#{File.basename(path)}"
-        kept << {path, @tree.copy(path, copy) ? copy : nil}
+      paths << manifest.proxy unless @tree.read(manifest.proxy) { |io, _| io && sha256_of(io) == staged }
+      paths.each_with_index do |path, index|
+        copy = "#{STATE}/previous/#{index}"
+        kept << {path, @tree.copy(path, copy, path == CONFIG ? CONFIG_MAX : Tree::MAX_FILE) ? copy : nil}
       end
     end
 
@@ -473,14 +535,16 @@ module GatewayInstaller
     # 6. Check, until it passes or the time is up; then again after a pause,
     # so a proxy that comes up and falls over does not pass.
     private def check(plugin_id : String, version : String?, since : Time) : String?
-      deadline = @system.now + @check_within
+      deadline = @system.ticks + @check_within
       until (reason = check_once(plugin_id, version, since)).nil?
-        return reason if @system.now >= deadline
+        return reason if @system.ticks >= deadline
         @system.sleep(@poll_every)
       end
-      state = @system.unit_state
+      before = @system.unit_state
       @system.sleep(@settle)
-      return "cliproxyapi restarted within #{@settle.total_seconds.to_i} s of passing its check" unless @system.unit_state == state
+      after = @system.unit_state
+      return "cliproxyapi's MainPID and NRestarts could not be read" unless before && after
+      return "cliproxyapi restarted within #{@settle.total_seconds.to_i} s of passing its check" unless after == before
       nil
     end
 
@@ -490,6 +554,8 @@ module GatewayInstaller
         return "plugin #{plugin_id} #{version} did not register".squeeze(' ')
       end
       return "the API server did not start" unless journal.includes?("API server started successfully")
+      # Until its watcher runs, a management key write is saved but never goes live.
+      return "the config watcher did not start" unless journal.includes?(WATCHER)
       pid = @system.unit_state.try(&.first) || 0_i64
       return "cliproxyapi is not running" unless pid > 0
       proxy = @tree.read(DROP_IN).try(&.[PROXY_PATH]?)
@@ -513,7 +579,7 @@ module GatewayInstaller
     end
 
     private def models_url : String?
-      config = YAML.parse(@tree.read(CONFIG) || return)
+      config = YAML.parse(@tree.read(CONFIG, CONFIG_MAX) || return)
       return unless config.as_h?
       host = config["host"]?.try(&.as_s?).presence || "127.0.0.1"
       port = config["port"]?.try(&.as_i?) || 8317

@@ -40,11 +40,15 @@ class FakeSystem < GatewayInstaller::System
   getter clock = Time.utc(2026, 11, 8)
   getter isolated_with : Array(String)? = nil
   property bundles = {} of String => Bytes
-  property isolated = true
+  property placement = GatewayInstaller::Placement::Isolated
+  # Whether cliproxyapi has a main process (at boot, before it starts, not).
+  property running = true
   # The process keeps running the old binary, as when the unit was not reloaded.
   property stale_exe = false
   # The process falls over and systemd restarts it, again and again.
   property flapping = false
+  # The journal lacks the config watcher's line after this restart.
+  property journal_without_watcher_at : Int32? = nil
   # The journal cannot be read after this restart.
   property journal_fails_at : Int32? = nil
   # Called at each restart, with its number.
@@ -57,8 +61,8 @@ class FakeSystem < GatewayInstaller::System
   def initialize(@root : String)
   end
 
-  def isolated?(move_id : String) : Bool
-    @isolated
+  def placement(move_id : String) : GatewayInstaller::Placement
+    @placement
   end
 
   def isolate(args : Array(String)) : {Int32, String}
@@ -83,7 +87,8 @@ class FakeSystem < GatewayInstaller::System
     plugin = File.read("#{@root}#{GatewayInstaller::PLUGIN_DIR}/gentility-usage.so")
     @journal = if version = plugin.lchop?("plugin ")
                  "plugin registered plugin_id=gentility-usage name=usage version=#{version}\n" \
-                 "API server started successfully on: [::1]:8317\n"
+                 "API server started successfully on: [::1]:8317\n" \
+                 "#{GatewayInstaller::WATCHER}\n"
                else
                  "plugin load failed\nAPI server started successfully on: [::1]:8317\n"
                end
@@ -92,7 +97,7 @@ class FakeSystem < GatewayInstaller::System
 
   def unit_state : {Int64, Int64}?
     @nrestarts += 1 if @flapping
-    {@pid, @nrestarts}
+    {@running ? @pid : 0_i64, @nrestarts}
   end
 
   def exe(pid : Int64) : String?
@@ -101,6 +106,7 @@ class FakeSystem < GatewayInstaller::System
 
   def journal_since(since : Time) : String
     raise IO::Error.new("journalctl: no such file") if @restarts == @journal_fails_at
+    return @journal.sub(GatewayInstaller::WATCHER, "") if @restarts == @journal_without_watcher_at
     @journal
   end
 
@@ -110,6 +116,10 @@ class FakeSystem < GatewayInstaller::System
 
   def now : Time
     @clock
+  end
+
+  def ticks : Time::Span
+    @clock - Time.utc(2026, 11, 8)
   end
 
   def sleep(span : Time::Span) : Nil
@@ -216,7 +226,7 @@ describe GatewayInstaller::Installer do
       File.read(root + "/opt/cliproxyapi/8.0.60/cli-proxy-api").should eq("proxy 8.0.60")
       File.read(root + "/opt/cliproxyapi/8.0.47/cli-proxy-api").should eq("proxy 8.0.47")
       File.read("#{root}#{GatewayInstaller::PLUGIN_DIR}/gentility-usage.so").should eq("plugin 0.2.0")
-      File.read("#{root}/var/lib/gentility-gateway/previous/gentility-usage.so").should eq("plugin 0.1.0")
+      File.read("#{root}/var/lib/gentility-gateway/previous/2").should eq("plugin 0.1.0")
       JSON.parse(File.read(root + GatewayInstaller::CURRENT)).should eq(answer["running"])
       JSON.parse(File.read("#{root}/var/lib/gentility-gateway/moves/#{MOVE}.json")).should eq(answer)
       File.exists?("#{root}/var/lib/gentility-gateway/staging/#{MOVE}").should be_false
@@ -275,12 +285,26 @@ describe GatewayInstaller::Installer do
       answer["reason"].as_s.should contain("the previous version failed its check too")
       answer["running"].raw.should be_nil
       answer["previous"]["bundle"].should eq("8.0.47-0.1.0")
+      # Nothing known runs, so there is no record of what does.
+      File.exists?(root + GatewayInstaller::CURRENT).should be_false
+    end
+  end
+
+  it "refuses when it cannot tell whether it runs in a unit of its own" do
+    with_host do |root, key, system, installer|
+      system.placement = GatewayInstaller::Placement::Unknown
+      status, answer = install(installer, system, bundle(key))
+      status.should eq(1)
+      answer["result"].should eq("refused")
+      answer["reason"].should eq("cannot tell whether the helper runs in a unit of its own")
+      system.isolated_with.should be_nil
+      system.fetches.should eq(0)
     end
   end
 
   it "runs the move in its own unit when started anywhere else" do
     with_host do |root, key, system, installer|
-      system.isolated = false
+      system.placement = GatewayInstaller::Placement::Outside
       status, output = installer.run([MOVE, URL, "a" * 64])
       {status, output}.should eq({0, %({"from":"the move unit"})})
       system.isolated_with.should eq([MOVE, URL, "a" * 64])
@@ -297,6 +321,15 @@ describe GatewayInstaller::Installer do
         answer["reason"].as_s.should start_with(
           "cliproxyapi runs /opt/cliproxyapi/8.0.47/cli-proxy-api, not /opt/cliproxyapi/8.0.60/cli-proxy-api")
         File.read(root + GatewayInstaller::DROP_IN).should eq(DROPIN)
+      end
+    end
+
+    it "the proxy's config watcher does not start" do
+      with_host do |root, key, system, installer|
+        system.journal_without_watcher_at = 1
+        _, answer = install(installer, system, bundle(key))
+        answer["result"].should eq("rolled_back")
+        answer["reason"].as_s.should start_with("the config watcher did not start")
       end
     end
 
@@ -352,6 +385,7 @@ describe GatewayInstaller::Installer do
           interrupted["reason"].should eq("interrupted")
           interrupted["running"]["bundle"].should eq("8.0.47-0.1.0")
           File.exists?(cut + GatewayInstaller::MARKER).should be_false
+          JSON.parse(File.read(cut + GatewayInstaller::CURRENT))["bundle"].should eq("8.0.47-0.1.0")
           # The next move then ran from the restored host, and rolled back to it.
           answer["result"].should eq("rolled_back")
           answer["previous"]["bundle"].should eq("8.0.47-0.1.0")
@@ -364,9 +398,70 @@ describe GatewayInstaller::Installer do
       end
     end
 
+    it "is put back at boot, before the proxy starts, without a restart" do
+      with_host do |root, key, system, installer|
+        cut = "#{root}-cut"
+        system.on_restart = ->(n : Int32) { FileUtils.cp_r(root, cut) if n == 1; nil }
+        install(installer, system, bundle(key))
+        begin
+          boot = FakeSystem.new(cut)
+          boot.running = false
+          status, output = GatewayInstaller::Installer.new(boot, cut).run(["--recover"])
+
+          status.should eq(0)
+          answer = JSON.parse(output)
+          answer["move_id"].should eq(MOVE)
+          answer["result"].should eq("rolled_back")
+          answer["reason"].should eq("interrupted")
+          boot.restarts.should eq(0)
+          File.read(cut + GatewayInstaller::DROP_IN).should eq(DROPIN)
+          File.read("#{cut}#{GatewayInstaller::PLUGIN_DIR}/gentility-usage.so").should eq("plugin 0.1.0")
+          JSON.parse(File.read(cut + GatewayInstaller::CURRENT))["bundle"].should eq("8.0.47-0.1.0")
+          File.exists?(cut + GatewayInstaller::MARKER).should be_false
+          # A second boot finds nothing to do.
+          GatewayInstaller::Installer.new(boot, cut).run(["--recover"]).should eq({0, ""})
+        ensure
+          FileUtils.rm_rf(cut)
+        end
+      end
+    end
+
+    it "rolls back current.json with the files when the record was never written" do
+      with_host do |root, key, system, installer|
+        # A move that passed and wrote current.json, then was cut off before
+        # its record: its marker (as of the restart) is still there.
+        cut = "#{root}-cut"
+        system.on_restart = ->(n : Int32) { FileUtils.cp_r(root, cut) if n == 1; nil }
+        install(installer, system, bundle(key))
+        begin
+          FileUtils.cp(cut + GatewayInstaller::MARKER, root + GatewayInstaller::MARKER)
+          File.delete("#{root}/var/lib/gentility-gateway/moves/#{MOVE}.json")
+          JSON.parse(File.read(root + GatewayInstaller::CURRENT))["bundle"].should eq("8.0.60-0.2.0")
+
+          _, later = install(installer, system, bundle(key, plugin: "broken"), move: "019a5b2c-0000-7000-8000-000000000002")
+          JSON.parse(File.read("#{root}/var/lib/gentility-gateway/moves/#{MOVE}.json"))["reason"].should eq("interrupted")
+          later["previous"]["bundle"].should eq("8.0.47-0.1.0")
+          JSON.parse(File.read(root + GatewayInstaller::CURRENT))["bundle"].should eq("8.0.47-0.1.0")
+        ensure
+          FileUtils.rm_rf(cut)
+        end
+      end
+    end
+
+    it "refuses the next move, saying why, when it cannot be put back" do
+      with_host do |root, key, system, installer|
+        system.on_restart = ->(n : Int32) { File.delete("#{root}/var/lib/gentility-gateway/previous/2") if n == 1 }
+        install(installer, system, bundle(key, plugin: "broken"))
+        status, answer = install(installer, system, bundle(key), move: "019a5b2c-0000-7000-8000-000000000002")
+        status.should eq(1)
+        answer["result"].should eq("refused")
+        answer["reason"].as_s.should start_with("a cut-off move could not be put back, so this one was not tried")
+      end
+    end
+
     it "answers failed, keeping its marker, when the roll back cannot finish" do
       with_host do |root, key, system, installer|
-        system.on_restart = ->(n : Int32) { File.delete("#{root}/var/lib/gentility-gateway/previous/gentility-usage.so") if n == 1 }
+        system.on_restart = ->(n : Int32) { File.delete("#{root}/var/lib/gentility-gateway/previous/2") if n == 1 }
         status, answer = install(installer, system, bundle(key, plugin: "broken"))
         status.should eq(1)
         answer["result"].should eq("failed")
@@ -382,7 +477,7 @@ describe GatewayInstaller::Installer do
       with_host do |root, key, system, installer|
         _, answer = install(installer, system, bundle(key, upstream: "8.0.47"))
         answer["result"].should eq("moved")
-        File.exists?("#{root}/var/lib/gentility-gateway/previous/cli-proxy-api").should be_false
+        File.exists?("#{root}/var/lib/gentility-gateway/previous/3").should be_false
         File.read(root + "/opt/cliproxyapi/8.0.47/cli-proxy-api").should eq("proxy 8.0.47")
       end
     end

@@ -29,24 +29,30 @@ module GatewayInstaller
     {% end %}
     NOFOLLOW = LibC::O_NOFOLLOW | LibC::O_CLOEXEC
 
+    # No file the helper reads or copies is larger than this.
+    MAX_FILE = 512_i64 * 1024 * 1024
+
     def initialize(@root : String)
     end
 
-    # Yields the file's contents, or nil when there is none. Refuses a link,
-    # anything but a regular file, and a file with other names (a hard link).
-    def read(path : String, & : IO::FileDescriptor? -> T) : T forall T
+    # Yields the file's contents, as of its size when opened, with its owner
+    # and mode; or nils when there is no file. Refuses a link, anything but a
+    # regular file, a file with other names (a hard link), and one over `max`.
+    def read(path : String, max = MAX_FILE, & : IO?, Owner? -> T) : T forall T
       dirfd = open_dir(File.dirname(path))
-      return yield nil unless dirfd
+      return yield nil, nil unless dirfd
       begin
-        fd = C.openat(dirfd, File.basename(path), LibC::O_RDONLY | LibC::O_NONBLOCK | NOFOLLOW)
-        return yield nil if fd < 0 && Errno.value.enoent?
-        raise RuntimeError.from_errno("Cannot open #{path}") if fd < 0
+        fd = C.openat(dirfd, step(File.basename(path)), LibC::O_RDONLY | LibC::O_NONBLOCK | NOFOLLOW)
+        return yield nil, nil if fd < 0 && Errno.value.enoent?
+        check fd, "open", path
         io = IO::FileDescriptor.new(fd)
         begin
-          stat = stat(fd, path)
+          check LibC.fstat(fd, out stat), "stat", path
           raise "#{path} is not a regular file" unless stat.st_mode & LibC::S_IFMT == LibC::S_IFREG
           raise "#{path} has other names" unless stat.st_nlink == 1
-          yield io
+          raise "#{path} is larger than #{max} bytes" if stat.st_size > max
+          owner = Owner.new(stat.st_uid.to_u32, stat.st_gid.to_u32, (stat.st_mode & 0o777).to_i32)
+          yield IO::Sized.new(io, stat.st_size), owner
         ensure
           io.close
         end
@@ -55,44 +61,49 @@ module GatewayInstaller
       end
     end
 
-    def read(path : String) : String?
-      read(path, &.try(&.gets_to_end))
+    def read(path : String, max = MAX_FILE) : String?
+      read(path, max) { |io, _| io.try(&.gets_to_end) }
     end
 
     def owner(path : String) : Owner?
-      read(path) { |io| owner(io, path) if io }
+      read(path) { |_, owner| owner }
     end
 
     def exists?(path : String) : Bool
-      read(path) { |io| !io.nil? }
+      read(path) { |io, _| !io.nil? }
     end
 
-    # Copies a file with its owner and mode, or another `owner`; false when
-    # there is no file to copy.
-    def copy(from : String, to : String, owner : Owner? = nil) : Bool
-      read(from) do |io|
-        next false unless io
-        write(to, io, owner || owner(io, from))
+    # Copies a file with its owner and mode; false when there is no file.
+    def copy(from : String, to : String, max = MAX_FILE) : Bool
+      read(from, max) do |io, owner|
+        next false unless io && owner
+        write(to, io, owner)
         true
       end
     end
 
     # Writes the file whole, through a rename, so it is never half written.
     def write(path : String, content : String | IO, owner : Owner) : Nil
+      name = step(File.basename(path))
       dirfd = open_dir(File.dirname(path), create: true).not_nil!
-      temp = ".#{File.basename(path)}.#{Random::Secure.hex(8)}"
+      temp = ".#{name}.#{Random::Secure.hex(8)}"
       fd = C.openat(dirfd, temp, LibC::O_WRONLY | LibC::O_CREAT | LibC::O_EXCL | NOFOLLOW, 0o600)
-      raise RuntimeError.from_errno("Cannot create #{path}") if fd < 0
+      begin
+        check fd, "create", path
+      rescue ex
+        LibC.close(dirfd)
+        raise ex
+      end
       io = IO::FileDescriptor.new(fd)
       begin
         content.is_a?(String) ? io.print(content) : IO.copy(content, io)
         io.flush
-        check LibC.fchown(fd, owner.uid, owner.gid), path
-        check LibC.fchmod(fd, LibC::ModeT.new(owner.mode)), path
+        check LibC.fchown(fd, owner.uid, owner.gid), "chown", path
+        check LibC.fchmod(fd, LibC::ModeT.new(owner.mode)), "chmod", path
         io.fsync
         io.close
-        check C.renameat(dirfd, temp, dirfd, File.basename(path)), path
-        LibC.fsync(dirfd)
+        check C.renameat(dirfd, temp, dirfd, name), "rename", path
+        check LibC.fsync(dirfd), "sync the directory of", path
       rescue ex
         io.close
         C.unlinkat(dirfd, temp, 0)
@@ -104,8 +115,8 @@ module GatewayInstaller
 
     def delete(path : String) : Nil
       return unless dirfd = open_dir(File.dirname(path))
-      if C.unlinkat(dirfd, File.basename(path), 0) < 0 && !Errno.value.enoent?
-        raise RuntimeError.from_errno("Cannot delete #{path}")
+      if C.unlinkat(dirfd, step(File.basename(path)), 0) < 0 && !Errno.value.enoent?
+        check -1, "delete", path
       end
     ensure
       LibC.close(dirfd) if dirfd
@@ -115,19 +126,22 @@ module GatewayInstaller
     # making the missing ones when `create`; nil when one is missing otherwise.
     private def open_dir(path : String, create = false) : LibC::Int?
       fd = LibC.open(@root.empty? ? "/" : @root, LibC::O_RDONLY | O_DIRECTORY | LibC::O_CLOEXEC)
-      raise RuntimeError.from_errno("Cannot open #{@root}") if fd < 0
-      path.split('/', remove_empty: true).each do |step|
-        next_fd = C.openat(fd, step, LibC::O_RDONLY | O_DIRECTORY | NOFOLLOW)
+      check fd, "open", @root
+      path.split('/', remove_empty: true).each do |name|
+        next_fd = C.openat(fd, step(name), LibC::O_RDONLY | O_DIRECTORY | NOFOLLOW)
         if next_fd < 0 && Errno.value.enoent? && create
-          C.mkdirat(fd, step, 0o755)
-          next_fd = C.openat(fd, step, LibC::O_RDONLY | O_DIRECTORY | NOFOLLOW)
+          if C.mkdirat(fd, name, 0o755) < 0 && !Errno.value.eexist?
+            errno = Errno.value
+            LibC.close(fd)
+            raise RuntimeError.from_os_error("Cannot make #{path} (at #{name})", errno)
+          end
+          next_fd = C.openat(fd, name, LibC::O_RDONLY | O_DIRECTORY | NOFOLLOW)
         end
         if next_fd < 0
-          error = RuntimeError.from_errno("Cannot open #{path} (at #{step})")
-          missing = Errno.value.enoent?
+          errno = Errno.value
           LibC.close(fd)
-          return if missing
-          raise error
+          return if errno.enoent?
+          raise RuntimeError.from_os_error("Cannot open #{path} (at #{name})", errno)
         end
         LibC.close(fd)
         fd = next_fd
@@ -135,18 +149,15 @@ module GatewayInstaller
       fd
     end
 
-    private def owner(io : IO::FileDescriptor, path : String) : Owner
-      stat = stat(io.fd, path)
-      Owner.new(stat.st_uid.to_u32, stat.st_gid.to_u32, (stat.st_mode & 0o7777).to_i32)
+    private def step(name : String) : String
+      raise "#{name.inspect} is not a file name" if name.in?("", ".", "..") || name.includes?('/')
+      name
     end
 
-    private def stat(fd : LibC::Int, path : String) : LibC::Stat
-      check LibC.fstat(fd, out stat), path
-      stat
-    end
-
-    private def check(result : LibC::Int, path : String) : Nil
-      raise RuntimeError.from_errno("Cannot write #{path}") if result < 0
+    private def check(result : LibC::Int, what : String, path : String) : Nil
+      return unless result < 0
+      errno = Errno.value
+      raise RuntimeError.from_os_error("Cannot #{what} #{path}", errno)
     end
   end
 end
