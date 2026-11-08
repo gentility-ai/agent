@@ -39,6 +39,13 @@ module GatewayInstaller
   # The boot unit's word: put back what a cut-off move left, before the proxy starts.
   RECOVER = "--recover"
   WATCHER = "file watcher started for config and auth directory changes"
+  # The gentility-usage plugin's harness prefixes (the gateway repo's
+  # contract/key_prefixes.json): its key scope refuses a key with none of them.
+  KEY_PREFIXES  = {"omp_", "claude_", "codex_"}
+  CANARY_WITHIN = 20.seconds
+  # The first plugin version with a key scope; a move to an older one is not
+  # asked to show it.
+  SCOPED_FROM = {0, 5, 0}
 
   class Refused < Exception
   end
@@ -56,8 +63,12 @@ module GatewayInstaller
     getter reason : String
     getter running : Running?
     getter previous : Running?
+    # Whether what runs refused the canary, as the key scope must: "live";
+    # "absent" when asked and it did not; "unchecked" when not asked (a
+    # plugin older than the scope, a boot, nothing known running).
+    getter key_scope : String?
 
-    def initialize(@move_id, @result, @reason, @running, @previous)
+    def initialize(@move_id, @result, @reason, @running, @previous, @key_scope = nil)
     end
   end
 
@@ -80,6 +91,21 @@ module GatewayInstaller
 
     def plugin : String
       "#{PLUGIN_DIR}/#{plugin_file}"
+    end
+  end
+
+  # The request that shows the key scope live. It goes as the sentinel, the
+  # one client key with no harness prefix, which the proxy accepts and the
+  # scope must refuse; and for a model an openai-compatibility login serves,
+  # so that it reaches the scope instead of failing auth selection first.
+  record Canary, url : String, key : String, model : String do
+    # Never the key.
+    def inspect(io : IO) : Nil
+      io << "Canary(" << url << ", " << model << ')'
+    end
+
+    def to_s(io : IO) : Nil
+      inspect(io)
     end
   end
 
@@ -138,6 +164,11 @@ module GatewayInstaller
     abstract def exe(pid : Int64) : String?
     abstract def journal_since(since : Time) : String
     abstract def models_status(url : String) : Int32?
+    # The status and the start of the body of one chat completion asked as
+    # `key`; nil when nothing answered within CANARY_WITHIN.
+    abstract def canary(url : String, key : String, model : String) : {Int32, String}?
+    # Whether an address is one of this host's own.
+    abstract def local?(address : Socket::IPAddress) : Bool
 
     def now : Time
       Time.utc
@@ -254,6 +285,49 @@ module GatewayInstaller
     ensure
       client.try &.close
     end
+
+    def initialize(@canary_within = CANARY_WITHIN)
+    end
+
+    def canary(url : String, key : String, model : String) : {Int32, String}?
+      answered = Channel({Int32, String}?).new(1)
+      spawn { answered.send(post_canary(url, key, model)) }
+      select
+      when answer = answered.receive
+        answer
+      when timeout(@canary_within)
+        nil
+      end
+    end
+
+    # Only an address of this host's binds.
+    def local?(address : Socket::IPAddress) : Bool
+      socket = UDPSocket.new(address.family)
+      socket.bind(Socket::IPAddress.new(address.address, 0))
+      true
+    rescue Socket::Error
+      false
+    ensure
+      socket.try &.close
+    end
+
+    private def post_canary(url : String, key : String, model : String) : {Int32, String}?
+      uri = URI.parse(url)
+      client = HTTP::Client.new(uri)
+      client.connect_timeout = @canary_within
+      client.read_timeout = @canary_within
+      headers = HTTP::Headers{"Authorization" => "Bearer #{key}", "Content-Type" => "application/json"}
+      body = {model: model, max_tokens: 1, messages: [{role: "user", content: "x"}]}.to_json
+      client.post(uri.request_target, headers: headers, body: body) do |response|
+        start = IO::Memory.new
+        IO.copy(response.body_io, start, 64 * 1024)
+        {response.status_code, start.to_s}
+      end
+    rescue
+      nil
+    ensure
+      client.try &.close
+    end
   end
 
   class Installer
@@ -320,8 +394,10 @@ module GatewayInstaller
 
     private def attempt(move_id : String, url : String, sha256 : String) : Answer
       previous = current
-      manifest = begin
-        fetch_and_verify(url, sha256, staging(move_id))
+      canary, manifest = begin
+        verified = fetch_and_verify(url, sha256, staging(move_id))
+        proxy_url
+        {scoped?(verified.plugin_version) ? read_canary : nil, verified}
       rescue ex : Refused
         return Answer.new(move_id, "refused", ex.message.to_s, previous, previous)
       rescue ex
@@ -336,16 +412,18 @@ module GatewayInstaller
         return Answer.new(move_id, "refused", "could not keep the previous version: #{ex.message}", previous, previous)
       end
 
-      # 4. Install beside, 5. switch, and 6. check. The drop-in changes in one
-      # rename; the plugin, replaced in place before it, is the marker's to undo.
+      # 4. Install beside, 5. switch, and 6. check, which a version without a
+      # live key scope fails. The drop-in changes in one rename; the plugin,
+      # replaced in place before it, is the marker's to undo.
       reason = begin
         install_beside(manifest, staging(move_id), kept)
         switch(manifest)
-        restart_and_check(manifest.plugin_id, manifest.plugin_version)
+        restart_and_check(manifest.plugin_id, manifest.plugin_version) ||
+        canary.try { |asked| scope_fault(asked).try { |fault| "the key scope is not live: #{fault}" } }
       rescue ex
         "install failed: #{ex.message}"
       end
-      return Answer.new(move_id, "moved", "", manifest.running, previous) unless reason
+      return Answer.new(move_id, "moved", "", manifest.running, previous, canary ? "live" : "unchecked") unless reason
 
       # 7. Roll back.
       roll_back(move_id, kept, manifest.plugin_id, previous, reason)
@@ -354,8 +432,10 @@ module GatewayInstaller
     # Puts back what was kept and checks the previous version. When that fails
     # too, nothing known runs: the answer's `running` is null. Without
     # `restart`, the proxy is not running (boot): systemd starts it later.
+    # The previous version need not have a live key scope; it is asked only
+    # when `ask`, and the answer says what it found.
     private def roll_back(move_id : String, kept : Array({String, String?}), plugin_id : String,
-                          previous : Running?, reason : String, restart = true) : Answer
+                          previous : Running?, reason : String, restart = true, ask = true) : Answer
       kept.each do |target, copy|
         if copy
           raise "the kept copy of #{target} is gone" unless @tree.copy(copy, target)
@@ -364,24 +444,36 @@ module GatewayInstaller
         end
       end
       unless restart
-        return Answer.new(move_id, "rolled_back", reason, previous, previous) if @system.daemon_reload
-        return Answer.new(move_id, "rolled_back", "#{reason}; daemon-reload failed", nil, previous)
+        return Answer.new(move_id, "rolled_back", "#{reason}; daemon-reload failed", nil, previous, "unchecked") unless @system.daemon_reload
+        return Answer.new(move_id, "rolled_back", reason, previous, previous, "unchecked")
       end
       if again = restart_and_check(plugin_id, previous.try(&.plugin_version))
-        return Answer.new(move_id, "rolled_back", "#{reason}; the previous version failed its check too: #{again}", nil, previous)
+        return Answer.new(move_id, "rolled_back", "#{reason}; the previous version failed its check too: #{again}", nil, previous, "unchecked")
       end
-      Answer.new(move_id, "rolled_back", reason, previous, previous)
+      Answer.new(move_id, "rolled_back", reason, previous, previous, ask ? scope_of(previous) : "unchecked")
+    end
+
+    # Whether a version that passed its check has a live key scope. Only a
+    # plugin with one is asked, so the sentinel never goes through a plugin
+    # that would let it reach a login.
+    private def scope_of(running : Running?) : String
+      return "unchecked" unless running && scoped?(running.plugin_version)
+      canary = (read_canary rescue nil) || return "unchecked"
+      scope_fault(canary) ? "absent" : "live"
+    rescue
+      "absent"
     end
 
     # A move cut off midway (a crash, a reboot) left its marker: put the
     # previous version back and record the move as interrupted. At boot the
-    # proxy has not started unless something started it by hand.
+    # proxy has not started unless something started it by hand, and the
+    # boot unit does not wait on the canary.
     private def recover(at_boot = false) : Answer?
       return unless json = @tree.read(MARKER)
       marker = Marker.from_json(json)
       unless @tree.exists?(record_path(marker.move_id))
         restart = !at_boot || (@system.unit_state.try(&.first) || 0) > 0
-        answer = roll_back(marker.move_id, marker.kept, marker.plugin_id, marker.previous, "interrupted", restart)
+        answer = roll_back(marker.move_id, marker.kept, marker.plugin_id, marker.previous, "interrupted", restart, ask: !at_boot)
       end
       finish(marker.move_id, answer)
       answer
@@ -392,7 +484,8 @@ module GatewayInstaller
     private def finish(move_id : String, answer : Answer?) : Nil
       if answer && answer.result != "refused"
         if running = answer.running
-          @tree.write(CURRENT, running.to_json, Owner.root(0o644))
+          json = JSON.parse(running.to_json).as_h.merge({"key_scope" => JSON::Any.new(answer.key_scope)})
+          @tree.write(CURRENT, json.to_json, Owner.root(0o644))
         else
           @tree.delete(CURRENT)
         end
@@ -578,15 +671,87 @@ module GatewayInstaller
       line.matches?(/(^|\s)#{key}="?#{Regex.escape(value)}"?(\s|$)/)
     end
 
+    # Why the key scope is not live, or nil when it is: it refuses the canary
+    # with its own 403. The reason is the status alone: the body is the
+    # proxy's, and could echo the key.
+    private def scope_fault(canary : Canary) : String?
+      status, body = @system.canary(canary.url, canary.key, canary.model) ||
+                     return "no answer within #{CANARY_WITHIN.total_seconds.to_i} s"
+      type = JSON.parse(body)["error"]["type"].as_s? rescue nil
+      status.to_s unless status == 403 && type == "key_scope"
+    end
+
+    # Whether a plugin version has the key scope. One that cannot be read is
+    # taken to have it, so its move must show it.
+    private def scoped?(version : String) : Bool
+      semver = SemanticVersion.parse(version)
+      {semver.major, semver.minor, semver.patch} >= SCOPED_FROM
+    rescue ArgumentError
+      true
+    end
+
+    # The canary as config.yaml sets it up, read before the host changes: a
+    # move whose key scope could not be shown live is not tried.
+    private def read_canary : Canary
+      config = config_yaml || raise Refused.new("config.yaml is unreadable")
+      # The v8 layout's place first, then the legacy one (config.example.yaml).
+      keys = (config.dig?("access", "api-keys") || config["api-keys"]?).try(&.as_a?) || [] of YAML::Any
+      sentinels = keys.compact_map(&.as_s?).reject { |key| KEY_PREFIXES.any? { |prefix| key.starts_with?(prefix) } }
+      unless sentinels.size == 1
+        raise Refused.new("access.api-keys has #{sentinels.size} keys without a harness prefix; expected exactly one, the sentinel")
+      end
+      providers = (config.dig?("api-keys", "openai-compatibility") || config["openai-compatibility"]?).try(&.as_a?) || [] of YAML::Any
+      model = providers.compact_map { |provider| served_model(provider) }.first? ||
+              raise Refused.new("config.yaml names no openai-compatibility model")
+      Canary.new("#{listen(config)}/v1/chat/completions", sentinels.first, model)
+    rescue ex : Refused
+      raise ex
+    rescue
+      raise Refused.new("config.yaml is unreadable")
+    end
+
+    # A provider's first model, as a client names it.
+    private def served_model(provider : YAML::Any) : String?
+      return unless provider.as_h? && provider["disabled"]?.try(&.raw) != true
+      model = provider["models"]?.try(&.as_a?).try(&.first?) || return
+      name = model["alias"]?.try(&.as_s?).presence || model["name"]?.try(&.as_s?).presence || return
+      prefix = provider["prefix"]?.try(&.as_s?).presence
+      prefix ? "#{prefix}/#{name}" : name
+    end
+
     private def models_url : String?
-      config = YAML.parse(@tree.read(CONFIG, CONFIG_MAX) || return)
-      return unless config.as_h?
-      host = config["host"]?.try(&.as_s?).presence || "127.0.0.1"
-      port = config["port"]?.try(&.as_i?) || 8317
-      host = "[#{host}]" if host.includes?(':')
-      "http://#{host}:#{port}/v1/models"
+      "#{proxy_url}/v1/models"
     rescue
       nil
+    end
+
+    private def proxy_url : String
+      listen(config_yaml || raise Refused.new("config.yaml is unreadable"))
+    end
+
+    private def config_yaml : YAML::Any?
+      config = YAML.parse(@tree.read(CONFIG, CONFIG_MAX) || return)
+      config if config.as_h?
+    end
+
+    # Where the proxy listens: server.host and server.port, or the legacy
+    # host and port. The proxy's user writes config.yaml, and the canary
+    # carries the sentinel, so the address must be an IP literal of this
+    # host's own: never a name to resolve, never another host.
+    private def listen(config : YAML::Any) : String
+      host = (config.dig?("server", "host") || config["host"]?).try(&.as_s?) || ""
+      port = (config.dig?("server", "port") || config["port"]?).try(&.as_i?) || 8317
+      raise Refused.new("config.yaml's port is not a port") unless 1 <= port <= 65535
+      address = begin
+        Socket::IPAddress.new(host.empty? ? "0.0.0.0" : host.lchop('[').rchop(']'), port)
+      rescue Socket::Error
+        raise Refused.new("config.yaml's host is not an IP address")
+      end
+      address = Socket::IPAddress.new(address.family.inet6? ? "::1" : "127.0.0.1", port) if address.unspecified?
+      unless address.loopback? || @system.local?(address)
+        raise Refused.new("config.yaml's host is not an address of this host")
+      end
+      address.family.inet6? ? "http://[#{address.address}]:#{port}" : "http://#{address.address}:#{port}"
     end
 
     private def prepare_dirs : Nil

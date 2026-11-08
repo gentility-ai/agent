@@ -1,4 +1,5 @@
 require "spec"
+require "http/server"
 require "../src/gateway_install/installer"
 
 # Builds tar streams by hand, so a test can write entries a real bundle never
@@ -31,6 +32,11 @@ module TarWriter
   end
 end
 
+# The client key with no harness prefix in the fake host's config.yaml. A
+# plain word, so a reason built from the proxy's error type could carry it.
+SENTINEL = "gateway_sentinel_quokka_marmalade"
+SCOPED   = {403, %({"error":{"type":"key_scope","message":"this gateway key is for no harness"}})}
+
 # A host whose cliproxyapi "runs" whatever the drop-in and plugin name at
 # restart: a plugin file reading "plugin <version>" registers, anything else
 # does not, and the process runs the binary the drop-in names.
@@ -53,6 +59,12 @@ class FakeSystem < GatewayInstaller::System
   property journal_fails_at : Int32? = nil
   # Called at each restart, with its number.
   property on_restart : Proc(Int32, Nil)? = nil
+  # What the proxy answers the key scope canary, by restart number.
+  property canary_answer : Proc(Int32, {Int32, String}?) = ->(_n : Int32) { SCOPED.as({Int32, String}?) }
+  getter canaries = [] of {String, String, String}
+  # Where the proxy answers, and the addresses this host holds besides loopback.
+  property listen = "http://[::1]:8317"
+  property local = [] of String
   @journal = ""
   @pid = 100_i64
   @nrestarts = 0_i64
@@ -111,7 +123,16 @@ class FakeSystem < GatewayInstaller::System
   end
 
   def models_status(url : String) : Int32?
-    url == "http://[::1]:8317/v1/models" ? 401 : nil
+    url == "#{@listen}/v1/models" ? 401 : nil
+  end
+
+  def canary(url : String, key : String, model : String) : {Int32, String}?
+    @canaries << {url, key, model}
+    @canary_answer.call(@restarts)
+  end
+
+  def local?(address : Socket::IPAddress) : Bool
+    @local.includes?(address.address)
   end
 
   def now : Time
@@ -130,6 +151,28 @@ end
 MOVE   = "019a5b2c-0000-7000-8000-000000000001"
 URL    = "https://github.com/gentility-ai/gateway/releases/download/gateway-8.0.60-0.2.0/bundle.tar"
 DROPIN = "[Service]\nExecStart=\nExecStart=/opt/cliproxyapi/8.0.47/cli-proxy-api -config /var/lib/cliproxyapi/config.yaml\n"
+CONFIG = <<-YAML
+  server:
+    host: "::1"
+    port: 8317
+  access:
+    api-keys:
+      - "omp_4f2a"
+      - "#{SENTINEL}"
+      - "claude_9b1c"
+  api-keys:
+    openai-compatibility:
+      - name: "retired"
+        disabled: true
+        models: [{name: "old-model"}]
+      - name: "omp"
+        prefix: "gw"
+        models:
+          - name: "glm-5"
+            alias: "omp-glm"
+          - name: "kimi-k2"
+  YAML
+SENTINEL_LINE = %(    - "#{SENTINEL}"\n)
 
 def key_id(key : Ed25519::SigningKey) : String
   key.verify_key.key_bytes[0, 8].hexstring
@@ -147,7 +190,8 @@ end
 
 # A bundle as the packaging repo would build it, with knobs to spoil it.
 def bundle(key : Ed25519::SigningKey,
-           plugin = "plugin 0.2.0",
+           plugin_version = "0.5.0",
+           plugin = "plugin #{plugin_version}",
            kind = "gateway",
            format = 1,
            signing_key = key,
@@ -160,10 +204,10 @@ def bundle(key : Ed25519::SigningKey,
   manifest = {
     "kind"     => kind,
     "format"   => format,
-    "bundle"   => "#{upstream}-0.2.0",
+    "bundle"   => "#{upstream}-#{plugin_version}",
     "upstream" => {"repo" => "router-for-me/CLIProxyAPI", "version" => upstream,
                    "archive" => "CLIProxyAPI_#{upstream}_linux_amd64.tar.gz", "sha256" => sha256(archive)},
-    "plugin" => {"id" => "gentility-usage", "version" => "0.2.0", "commit" => "abc",
+    "plugin" => {"id" => "gentility-usage", "version" => plugin_version, "commit" => "abc",
                  "file" => "gentility-usage.so", "sha256" => sha256(plugin)},
     "unknown_field" => "ignored",
   }.to_json
@@ -183,7 +227,7 @@ def with_host(&)
   {
     "/etc/gentility-gateway/keys.json"                   => {"keys" => {key_id(key) => Base64.strict_encode(key.verify_key.key_bytes)}}.to_json,
     GatewayInstaller::DROP_IN                            => DROPIN,
-    GatewayInstaller::CONFIG                             => "host: \"::1\"\nport: 8317\n",
+    GatewayInstaller::CONFIG                             => CONFIG,
     "#{GatewayInstaller::PLUGIN_DIR}/gentility-usage.so" => "plugin 0.1.0",
     "/opt/cliproxyapi/8.0.47/cli-proxy-api"              => "proxy 8.0.47",
     GatewayInstaller::CURRENT                            => {"bundle" => "8.0.47-0.1.0", "upstream_version" => "8.0.47", "plugin_version" => "0.1.0"}.to_json,
@@ -196,6 +240,12 @@ def with_host(&)
   yield root, key, system, installer
 ensure
   FileUtils.rm_rf(root) if root
+end
+
+# The host as a move to plugin 0.5.0 left it: a previous version with the scope.
+def scoped_previous(root : String) : Nil
+  File.write("#{root}#{GatewayInstaller::PLUGIN_DIR}/gentility-usage.so", "plugin 0.5.0")
+  File.write(root + GatewayInstaller::CURRENT, {"bundle" => "8.0.47-0.5.0", "upstream_version" => "8.0.47", "plugin_version" => "0.5.0"}.to_json)
 end
 
 def install(installer, system, bytes : Bytes, sha = sha256(bytes), move = MOVE) : {Int32, JSON::Any}
@@ -219,15 +269,16 @@ describe GatewayInstaller::Installer do
       status.should eq(0)
       answer["result"].should eq("moved")
       answer["reason"].should eq("")
-      answer["running"].should eq(JSON.parse(%({"bundle":"8.0.60-0.2.0","upstream_version":"8.0.60","plugin_version":"0.2.0"})))
+      answer["running"].should eq(JSON.parse(%({"bundle":"8.0.60-0.5.0","upstream_version":"8.0.60","plugin_version":"0.5.0"})))
+      answer["key_scope"].should eq("live")
       answer["previous"]["bundle"].should eq("8.0.47-0.1.0")
 
       File.read(root + GatewayInstaller::DROP_IN).should contain("ExecStart=/opt/cliproxyapi/8.0.60/cli-proxy-api -config")
       File.read(root + "/opt/cliproxyapi/8.0.60/cli-proxy-api").should eq("proxy 8.0.60")
       File.read(root + "/opt/cliproxyapi/8.0.47/cli-proxy-api").should eq("proxy 8.0.47")
-      File.read("#{root}#{GatewayInstaller::PLUGIN_DIR}/gentility-usage.so").should eq("plugin 0.2.0")
+      File.read("#{root}#{GatewayInstaller::PLUGIN_DIR}/gentility-usage.so").should eq("plugin 0.5.0")
       File.read("#{root}/var/lib/gentility-gateway/previous/2").should eq("plugin 0.1.0")
-      JSON.parse(File.read(root + GatewayInstaller::CURRENT)).should eq(answer["running"])
+      JSON.parse(File.read(root + GatewayInstaller::CURRENT)).should eq(JSON.parse(%({"bundle":"8.0.60-0.5.0","upstream_version":"8.0.60","plugin_version":"0.5.0","key_scope":"live"})))
       JSON.parse(File.read("#{root}/var/lib/gentility-gateway/moves/#{MOVE}.json")).should eq(answer)
       File.exists?("#{root}/var/lib/gentility-gateway/staging/#{MOVE}").should be_false
     end
@@ -259,7 +310,7 @@ describe GatewayInstaller::Installer do
       _, answer = install(installer, system, bundle(key, plugin: "broken"))
 
       answer["result"].should eq("rolled_back")
-      answer["reason"].as_s.should start_with("plugin gentility-usage 0.2.0 did not register")
+      answer["reason"].as_s.should start_with("plugin gentility-usage 0.5.0 did not register")
       answer["reason"].as_s.should_not contain("previous version failed")
       answer["running"]["bundle"].should eq("8.0.47-0.1.0")
       system.restarts.should eq(2)
@@ -348,7 +399,7 @@ describe GatewayInstaller::Installer do
         _, answer = install(installer, system, bundle(key))
         answer["result"].should eq("rolled_back")
         answer["reason"].as_s.should start_with("config.yaml is unreadable")
-        File.read(root + GatewayInstaller::CONFIG).should eq("host: \"::1\"\nport: 8317\n")
+        File.read(root + GatewayInstaller::CONFIG).should eq(CONFIG)
       end
     end
 
@@ -360,6 +411,188 @@ describe GatewayInstaller::Installer do
         answer["reason"].as_s.should start_with("the check could not run: journalctl: no such file")
         answer["running"]["bundle"].should eq("8.0.47-0.1.0")
         File.read(root + GatewayInstaller::DROP_IN).should eq(DROPIN)
+      end
+    end
+  end
+
+  describe "the key scope canary" do
+    it "is the sentinel asking an openai-compatibility model, after the check passes" do
+      with_host do |root, key, system, installer|
+        install(installer, system, bundle(key))
+        system.canaries.should eq([{"http://[::1]:8317/v1/chat/completions", SENTINEL, "gw/omp-glm"}])
+        JSON.parse(File.read(root + GatewayInstaller::CURRENT))["key_scope"].should eq("live")
+      end
+    end
+
+    {
+      "answers 200"                     => {->(_n : Int32) { {200, %({"choices":[]})}.as({Int32, String}?) }, "200"},
+      "answers 403 of another type"     => {->(_n : Int32) { {403, %({"error":{"type":"forbidden"}})}.as({Int32, String}?) }, "403"},
+      "answers 403 without JSON"        => {->(_n : Int32) { {403, "Forbidden"}.as({Int32, String}?) }, "403"},
+      "answers 401, refusing the key"   => {->(_n : Int32) { {401, %({"error":{"type":"authentication_error"}})}.as({Int32, String}?) }, "401"},
+      "gives no answer within its time" => {->(_n : Int32) { nil.as({Int32, String}?) }, "no answer within 20 s"},
+    }.each do |what, (answer, fault)|
+      it "rolls back when the new version #{what}" do
+        with_host do |root, key, system, installer|
+          system.canary_answer = answer
+          _, moved = install(installer, system, bundle(key))
+          moved["result"].should eq("rolled_back")
+          moved["reason"].should eq("the key scope is not live: #{fault}")
+          File.read(root + GatewayInstaller::DROP_IN).should eq(DROPIN)
+          File.read("#{root}#{GatewayInstaller::PLUGIN_DIR}/gentility-usage.so").should eq("plugin 0.1.0")
+          moved["running"]["bundle"].should eq("8.0.47-0.1.0")
+          # The previous plugin, 0.1.0, has no scope, so it is not asked.
+          system.canaries.size.should eq(1)
+          moved["key_scope"].should eq("unchecked")
+          moved["running"]["key_scope"]?.should be_nil
+          JSON.parse(File.read(root + GatewayInstaller::CURRENT))["key_scope"].should eq("unchecked")
+        end
+      end
+    end
+
+    it "says whether a previous version that has the scope is live, after a roll back to it" do
+      with_host do |root, key, system, installer|
+        scoped_previous(root)
+        system.canary_answer = ->(n : Int32) { n == 1 ? {200, "{}"}.as({Int32, String}?) : SCOPED }
+        _, answer = install(installer, system, bundle(key))
+        answer["result"].should eq("rolled_back")
+        system.canaries.size.should eq(2)
+        answer["key_scope"].should eq("live")
+        JSON.parse(File.read(root + GatewayInstaller::CURRENT))["key_scope"].should eq("live")
+      end
+    end
+
+    it "asks only the previous version when the new one fails its check" do
+      with_host do |root, key, system, installer|
+        scoped_previous(root)
+        system.canary_answer = ->(_n : Int32) { {200, "{}"}.as({Int32, String}?) }
+        _, answer = install(installer, system, bundle(key, plugin: "broken"))
+        answer["reason"].as_s.should start_with("plugin gentility-usage 0.5.0 did not register")
+        system.canaries.size.should eq(1)
+        answer["key_scope"].should eq("absent")
+      end
+    end
+
+    describe "asks a target plugin by its version:" do
+      {"0.5.0" => true, "0.5.0-rc" => true, "0.10.0" => true, "v0.5" => true, "next" => true, "0.4.99" => false, "0.4.0" => false}.each do |version, asked|
+        it "#{version} is #{asked ? "" : "not "}asked" do
+          with_host do |root, key, system, installer|
+            _, answer = install(installer, system, bundle(key, plugin_version: version))
+            answer["result"].should eq("moved")
+            system.canaries.size.should eq(asked ? 1 : 0)
+            answer["key_scope"].should eq(asked ? "live" : "unchecked")
+          end
+        end
+      end
+    end
+
+    describe "refuses the move before the host changes when config.yaml has" do
+      {
+        "no sentinel"               => {"", 0},
+        "two keys without a prefix" => {"#{SENTINEL_LINE}    - other\n", 2},
+      }.each do |what, (lines, count)|
+        it what do
+          with_host do |root, key, system, installer|
+            File.write(root + GatewayInstaller::CONFIG, CONFIG.sub(SENTINEL_LINE, lines))
+            reason = "access.api-keys has #{count} keys without a harness prefix; expected exactly one, the sentinel"
+            _, answer = install(installer, system, bundle(key))
+            answer["result"].should eq("refused")
+            answer["reason"].should eq(reason)
+            host_unchanged(root, system)
+          end
+        end
+      end
+
+      it "no openai-compatibility model a login serves" do
+        with_host do |root, key, system, installer|
+          File.write(root + GatewayInstaller::CONFIG, CONFIG.sub(/    - name: "omp".*/m, ""))
+          _, answer = install(installer, system, bundle(key))
+          answer["reason"].should eq("config.yaml names no openai-compatibility model")
+          host_unchanged(root, system)
+        end
+      end
+
+      {
+        "another host's address" => {"config.yaml's host is not an address of this host", %(host: "203.0.113.7")},
+        "a name"                 => {"config.yaml's host is not an IP address", %(host: "evil.example")},
+        "a name with a path"     => {"config.yaml's host is not an IP address", %(host: "evil.example/x?")},
+        "a name with userinfo"   => {"config.yaml's host is not an IP address", %(host: "u@evil.example")},
+        "userinfo on loopback"   => {"config.yaml's host is not an IP address", %(host: "u@127.0.0.1")},
+      }.each do |what, (reason, host)|
+        it "a listen address of #{what}" do
+          with_host do |root, key, system, installer|
+            File.write(root + GatewayInstaller::CONFIG, CONFIG.sub(%(host: "::1"), host))
+            _, answer = install(installer, system, bundle(key))
+            answer["result"].should eq("refused")
+            answer["reason"].should eq(reason)
+            system.canaries.should be_empty
+            host_unchanged(root, system)
+          end
+        end
+      end
+
+      it "a listen port out of range" do
+        with_host do |root, key, system, installer|
+          File.write(root + GatewayInstaller::CONFIG, CONFIG.sub("port: 8317", "port: 70000"))
+          _, answer = install(installer, system, bundle(key))
+          answer["reason"].should eq("config.yaml's port is not a port")
+          host_unchanged(root, system)
+        end
+      end
+
+      it "another host's address, even for a plugin the canary skips" do
+        with_host do |root, key, system, installer|
+          File.write(root + GatewayInstaller::CONFIG, CONFIG.sub(%(host: "::1"), %(host: "203.0.113.7")))
+          _, answer = install(installer, system, bundle(key, plugin_version: "0.4.0"))
+          answer["reason"].should eq("config.yaml's host is not an address of this host")
+          host_unchanged(root, system)
+        end
+      end
+    end
+
+    {
+      %(host: "[fd06:6e7:0:2::6]") => "http://[fd06:6e7:0:2::6]:8317",
+      %(host: "::")                => "http://[::1]:8317",
+      %(host: "0.0.0.0")           => "http://127.0.0.1:8317",
+      %(host: "")                  => "http://127.0.0.1:8317",
+    }.each do |host, listen|
+      it "asks #{listen} for a listen address of #{host}" do
+        with_host do |root, key, system, installer|
+          system.local = ["fd06:6e7:0:2::6"]
+          system.listen = listen
+          File.write(root + GatewayInstaller::CONFIG, CONFIG.sub(%(host: "::1"), host))
+          _, answer = install(installer, system, bundle(key))
+          answer["result"].should eq("moved")
+          system.canaries.map(&.[0]).should eq(["#{listen}/v1/chat/completions"])
+        end
+      end
+    end
+
+    it "never writes the sentinel, or a piece of it, into an answer, a record or current.json" do
+      with_host do |root, key, system, installer|
+        outputs = [] of String
+        # The proxy even names the key in its refusal, whole, in part, or upper-cased.
+        echoes = [SENTINEL, SENTINEL[1..-2], SENTINEL.upcase].map do |echo|
+          {403, %({"error":{"type":"#{echo}","message":"bad key #{echo}"}})}
+        end
+        ([SCOPED] + echoes + [{200, SENTINEL}]).each_with_index do |answer, n|
+          system.canary_answer = ->(_n : Int32) { answer.as({Int32, String}?) }
+          system.bundles[URL] = bundle(key, upstream: "8.0.6#{n}")
+          outputs << installer.run(["019a5b2c-0000-7000-8000-00000000000#{n}", URL, sha256(system.bundles[URL])])[1]
+        end
+        File.write(root + GatewayInstaller::CONFIG, CONFIG.sub(SENTINEL_LINE, "#{SENTINEL_LINE}    - other\n"))
+        outputs << installer.run(["019a5b2c-0000-7000-8000-000000000009", URL, sha256(system.bundles[URL])])[1]
+
+        system.canaries.map(&.[1]).uniq.should eq([SENTINEL])
+        JSON.parse(outputs[0])["result"].should eq("moved")
+        outputs[1..4].each { |output| JSON.parse(output)["reason"].as_s.should start_with("the key scope is not live: ") }
+        JSON.parse(outputs[5])["result"].should eq("refused")
+        # Only the kept copy of config.yaml itself holds it.
+        written = Dir.glob("#{root}/var/lib/gentility-gateway/**/*", match: :dot_files)
+          .reject { |path| path.starts_with?("#{root}/var/lib/gentility-gateway/previous/") || File.directory?(path) }
+        written.should contain("#{root}#{GatewayInstaller::CURRENT}")
+        (outputs + written.map { |path| File.read(path) }).each(&.downcase.should_not(contain("quokka")))
+        GatewayInstaller::Canary.new("u", SENTINEL, "m").inspect.should_not contain(SENTINEL)
+        GatewayInstaller::Canary.new("u", SENTINEL, "m").to_s.should_not contain(SENTINEL)
       end
     end
   end
@@ -413,6 +646,7 @@ describe GatewayInstaller::Installer do
           answer["move_id"].should eq(MOVE)
           answer["result"].should eq("rolled_back")
           answer["reason"].should eq("interrupted")
+          answer["key_scope"].should eq("unchecked")
           boot.restarts.should eq(0)
           File.read(cut + GatewayInstaller::DROP_IN).should eq(DROPIN)
           File.read("#{cut}#{GatewayInstaller::PLUGIN_DIR}/gentility-usage.so").should eq("plugin 0.1.0")
@@ -420,6 +654,28 @@ describe GatewayInstaller::Installer do
           File.exists?(cut + GatewayInstaller::MARKER).should be_false
           # A second boot finds nothing to do.
           GatewayInstaller::Installer.new(boot, cut).run(["--recover"]).should eq({0, ""})
+        ensure
+          FileUtils.rm_rf(cut)
+        end
+      end
+    end
+
+    it "is put back at boot without asking the canary, even when the proxy runs" do
+      with_host do |root, key, system, installer|
+        scoped_previous(root)
+        cut = "#{root}-cut"
+        system.on_restart = ->(n : Int32) { FileUtils.cp_r(root, cut) if n == 1; nil }
+        install(installer, system, bundle(key))
+        begin
+          boot = FakeSystem.new(cut)
+          status, output = GatewayInstaller::Installer.new(boot, cut).run(["--recover"])
+          status.should eq(0)
+          answer = JSON.parse(output)
+          answer["result"].should eq("rolled_back")
+          answer["running"]["bundle"].should eq("8.0.47-0.5.0")
+          boot.restarts.should eq(1)
+          boot.canaries.should be_empty
+          answer["key_scope"].should eq("unchecked")
         ensure
           FileUtils.rm_rf(cut)
         end
@@ -436,7 +692,7 @@ describe GatewayInstaller::Installer do
         begin
           FileUtils.cp(cut + GatewayInstaller::MARKER, root + GatewayInstaller::MARKER)
           File.delete("#{root}/var/lib/gentility-gateway/moves/#{MOVE}.json")
-          JSON.parse(File.read(root + GatewayInstaller::CURRENT))["bundle"].should eq("8.0.60-0.2.0")
+          JSON.parse(File.read(root + GatewayInstaller::CURRENT))["bundle"].should eq("8.0.60-0.5.0")
 
           _, later = install(installer, system, bundle(key, plugin: "broken"), move: "019a5b2c-0000-7000-8000-000000000002")
           JSON.parse(File.read("#{root}/var/lib/gentility-gateway/moves/#{MOVE}.json"))["reason"].should eq("interrupted")
@@ -531,7 +787,7 @@ describe GatewayInstaller::Installer do
         answer["result"].should eq("rolled_back")
         File.read(outside).should eq("secret")
         File.symlink?(config).should be_false
-        File.read(config).should eq("host: \"::1\"\nport: 8317\n")
+        File.read(config).should eq(CONFIG)
       end
     end
   end
@@ -608,6 +864,59 @@ describe GatewayInstaller::Installer do
         end
       end
     end
+  end
+end
+
+describe GatewayInstaller::HostSystem do
+  describe "#canary" do
+    it "asks one chat completion as the key, and answers the status and up to 64 KiB of the body" do
+      asked = [] of String
+      server = HTTP::Server.new do |context|
+        request = context.request
+        asked << "#{request.method} #{request.path} #{request.headers["Authorization"]} #{request.headers["Content-Type"]} #{request.body.try(&.gets_to_end)}"
+        context.response.status_code = 403
+        context.response.print "x" * 200_000
+      end
+      address = server.bind_tcp("127.0.0.1", 0)
+      spawn { server.listen }
+      begin
+        status, body = GatewayInstaller::HostSystem.new.canary("http://127.0.0.1:#{address.port}/v1/chat/completions", "k_1", "gw/m").not_nil!
+        status.should eq(403)
+        body.size.should eq(64 * 1024)
+        asked.should eq([%(POST /v1/chat/completions Bearer k_1 application/json {"model":"gw/m","max_tokens":1,"messages":[{"role":"user","content":"x"}]})])
+      ensure
+        server.close
+      end
+    end
+
+    it "gives nil at its bound when the proxy trickles its answer" do
+      server = HTTP::Server.new do |context|
+        30.times { context.response.print "x"; context.response.flush; sleep 100.milliseconds }
+      end
+      address = server.bind_tcp("127.0.0.1", 0)
+      spawn { server.listen }
+      begin
+        started = Time.instant
+        GatewayInstaller::HostSystem.new(canary_within: 500.milliseconds)
+          .canary("http://127.0.0.1:#{address.port}/v1/chat/completions", "k", "m").should be_nil
+        (Time.instant - started).should be < 1.5.seconds
+      ensure
+        server.close
+      end
+    end
+
+    it "gives nil when nothing listens" do
+      closed = TCPServer.new("127.0.0.1", 0)
+      port = closed.local_address.port
+      closed.close
+      GatewayInstaller::HostSystem.new.canary("http://127.0.0.1:#{port}/v1/chat/completions", "k", "m").should be_nil
+    end
+  end
+
+  it "knows its own addresses from another host's" do
+    host = GatewayInstaller::HostSystem.new
+    host.local?(Socket::IPAddress.new("127.0.0.1", 8317)).should be_true
+    host.local?(Socket::IPAddress.new("192.0.2.1", 8317)).should be_false
   end
 end
 
