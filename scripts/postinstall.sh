@@ -85,6 +85,9 @@ fi
 # Reload systemd and enable the service
 systemctl daemon-reload
 systemctl enable gentility
+if [ -f /etc/systemd/system/gentility-gateway-recover.service ]; then
+    systemctl enable gentility-gateway-recover.service
+fi
 
 # Check if service was running before upgrade and restart it
 if [ -f /var/lib/gentility-agent/.was-running ]; then

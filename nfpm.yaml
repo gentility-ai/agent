@@ -103,6 +103,14 @@ contents:
       owner: root
       group: root
 
+  # Puts back a move cut off by a reboot, before the proxy starts.
+  - src: ./configs/gateway/gentility-gateway-recover.service
+    dst: /etc/systemd/system/gentility-gateway-recover.service
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+
 scripts:
   preinstall: ./scripts/preinstall.sh
   postinstall: ./scripts/postinstall.sh

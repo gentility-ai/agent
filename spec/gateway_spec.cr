@@ -18,6 +18,12 @@ describe Gateway do
         .should eq({"error" => "Missing move_id, bundle_url or sha256 parameter"})
     end
 
+    it "says so when the helper is killed by a signal" do
+      expect_raises(Exception, "Gateway helper gave no answer (killed by a signal)") do
+        Gateway.install(params, ["/bin/sh", "-c", "kill -9 $$"])
+      end
+    end
+
     it "raises when the helper gives no JSON answer" do
       expect_raises(Exception, "Gateway helper gave no answer (exit 1): sudo: a password is required") do
         Gateway.install(params, ["/bin/sh", "-c", "echo sudo: a password is required >&2; exit 1"])

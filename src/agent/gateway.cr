@@ -19,7 +19,8 @@ module Gateway
     unless answer.try(&.as_h?)
       said = error.to_s.strip
       said = "…#{said[-400..]}" if said.size > 400
-      raise "Gateway helper gave no answer (exit #{status.exit_code})#{": #{said}" unless said.empty?}"
+      ended = status.exit_code?.try { |code| "exit #{code}" } || "killed by a signal"
+      raise "Gateway helper gave no answer (#{ended})#{": #{said}" unless said.empty?}"
     end
     answer
   end

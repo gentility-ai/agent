@@ -1,0 +1,13 @@
+# Puts back the previous gateway bundle when a move was cut off midway (a
+# reboot, a crash), before the proxy starts on half-installed files.
+[Unit]
+Description=Put back a gateway bundle a cut-off move left half installed
+Before=cliproxyapi.service
+ConditionPathExists=/var/lib/gentility-gateway/in-flight.json
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/gentility/gentility-gateway-install --recover
+
+[Install]
+WantedBy=multi-user.target
