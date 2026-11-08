@@ -32,6 +32,20 @@ if [ ! -f /etc/gentility.yaml ]; then
     chown gentility:gentility /etc/gentility.yaml
 fi
 
+# The gateway helper's sudoers line goes live only once visudo accepts it,
+# through a dotted name sudo ignores until the rename.
+GATEWAY_SUDOERS="/usr/lib/gentility-agent/gentility-gateway.sudoers"
+if [ -f "$GATEWAY_SUDOERS" ]; then
+    if ! command -v visudo >/dev/null 2>&1; then
+        echo "Warning: visudo is missing; gateway installs stay off." >&2
+    elif visudo -cf "$GATEWAY_SUDOERS" >/dev/null; then
+        install -m 0440 -o root -g root "$GATEWAY_SUDOERS" /etc/sudoers.d/.gentility-gateway.new &&
+            mv -f /etc/sudoers.d/.gentility-gateway.new /etc/sudoers.d/gentility-gateway
+    else
+        echo "Warning: $GATEWAY_SUDOERS failed visudo -c; gateway installs stay off." >&2
+    fi
+fi
+
 # Offer sudo configuration if running interactively
 MANAGE_SUDO="/usr/lib/gentility-agent/manage-sudo.sh"
 if [ -t 0 ] && [ -f "$MANAGE_SUDO" ] && [ ! -f /etc/sudoers.d/gentility ]; then
@@ -71,6 +85,9 @@ fi
 # Reload systemd and enable the service
 systemctl daemon-reload
 systemctl enable gentility
+if [ -f /etc/systemd/system/gentility-gateway-recover.service ]; then
+    systemctl enable gentility-gateway-recover.service 2>/dev/null || true
+fi
 
 # Check if service was running before upgrade and restart it
 if [ -f /var/lib/gentility-agent/.was-running ]; then
