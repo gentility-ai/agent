@@ -50,9 +50,7 @@ module GatewayInstaller
   class Refused < Exception
   end
 
-  # What runs, and whether its key scope was seen live ("live" or "absent";
-  # unset in a record from before the scope).
-  record Running, bundle : String, upstream_version : String, plugin_version : String, key_scope : String? = nil do
+  record Running, bundle : String, upstream_version : String, plugin_version : String do
     include JSON::Serializable
   end
 
@@ -65,6 +63,9 @@ module GatewayInstaller
     getter reason : String
     getter running : Running?
     getter previous : Running?
+    # Whether what runs refused the canary, as the key scope must: "live";
+    # "absent" when asked and it did not; "unchecked" when not asked (a
+    # plugin older than the scope, a boot, nothing known running).
     getter key_scope : String?
 
     def initialize(@move_id, @result, @reason, @running, @previous, @key_scope = nil)
@@ -97,7 +98,16 @@ module GatewayInstaller
   # one client key with no harness prefix, which the proxy accepts and the
   # scope must refuse; and for a model an openai-compatibility login serves,
   # so that it reaches the scope instead of failing auth selection first.
-  record Canary, url : String, key : String, model : String
+  record Canary, url : String, key : String, model : String do
+    # Never the key.
+    def inspect(io : IO) : Nil
+      io << "Canary(" << url << ", " << model << ')'
+    end
+
+    def to_s(io : IO) : Nil
+      inspect(io)
+    end
+  end
 
   # Written before the host changes and removed once the move is recorded: a
   # helper that finds one knows a move was cut off, and puts back what it kept.
@@ -157,6 +167,8 @@ module GatewayInstaller
     # The status and the start of the body of one chat completion asked as
     # `key`; nil when nothing answered within CANARY_WITHIN.
     abstract def canary(url : String, key : String, model : String) : {Int32, String}?
+    # Whether an address is one of this host's own.
+    abstract def local?(address : Socket::IPAddress) : Bool
 
     def now : Time
       Time.utc
@@ -274,22 +286,36 @@ module GatewayInstaller
       client.try &.close
     end
 
+    def initialize(@canary_within = CANARY_WITHIN)
+    end
+
     def canary(url : String, key : String, model : String) : {Int32, String}?
       answered = Channel({Int32, String}?).new(1)
       spawn { answered.send(post_canary(url, key, model)) }
       select
       when answer = answered.receive
         answer
-      when timeout(CANARY_WITHIN)
+      when timeout(@canary_within)
         nil
       end
+    end
+
+    # Only an address of this host's binds.
+    def local?(address : Socket::IPAddress) : Bool
+      socket = UDPSocket.new(address.family)
+      socket.bind(Socket::IPAddress.new(address.address, 0))
+      true
+    rescue Socket::Error
+      false
+    ensure
+      socket.try &.close
     end
 
     private def post_canary(url : String, key : String, model : String) : {Int32, String}?
       uri = URI.parse(url)
       client = HTTP::Client.new(uri)
-      client.connect_timeout = CANARY_WITHIN
-      client.read_timeout = CANARY_WITHIN
+      client.connect_timeout = @canary_within
+      client.read_timeout = @canary_within
       headers = HTTP::Headers{"Authorization" => "Bearer #{key}", "Content-Type" => "application/json"}
       body = {model: model, max_tokens: 1, messages: [{role: "user", content: "x"}]}.to_json
       client.post(uri.request_target, headers: headers, body: body) do |response|
@@ -370,6 +396,7 @@ module GatewayInstaller
       previous = current
       canary, manifest = begin
         verified = fetch_and_verify(url, sha256, staging(move_id))
+        proxy_url
         {scoped?(verified.plugin_version) ? read_canary : nil, verified}
       rescue ex : Refused
         return Answer.new(move_id, "refused", ex.message.to_s, previous, previous)
@@ -392,12 +419,11 @@ module GatewayInstaller
         install_beside(manifest, staging(move_id), kept)
         switch(manifest)
         restart_and_check(manifest.plugin_id, manifest.plugin_version) ||
-        canary.try { |canary| scope_fault(canary).try { |fault| "the key scope is not live: #{fault}" } }
+        canary.try { |asked| scope_fault(asked).try { |fault| "the key scope is not live: #{fault}" } }
       rescue ex
         "install failed: #{ex.message}"
       end
-      scope = canary ? "live" : "absent"
-      return Answer.new(move_id, "moved", "", manifest.running.copy_with(key_scope: scope), previous, scope) unless reason
+      return Answer.new(move_id, "moved", "", manifest.running, previous, canary ? "live" : "unchecked") unless reason
 
       # 7. Roll back.
       roll_back(move_id, kept, manifest.plugin_id, previous, reason)
@@ -406,11 +432,10 @@ module GatewayInstaller
     # Puts back what was kept and checks the previous version. When that fails
     # too, nothing known runs: the answer's `running` is null. Without
     # `restart`, the proxy is not running (boot): systemd starts it later.
-    # The previous version need not have a live key scope; the answer says
-    # whether it was seen live, which at boot, or without a canary in the
-    # restored config.yaml, it is not.
+    # The previous version need not have a live key scope; it is asked only
+    # when `ask`, and the answer says what it found.
     private def roll_back(move_id : String, kept : Array({String, String?}), plugin_id : String,
-                          previous : Running?, reason : String, restart = true) : Answer
+                          previous : Running?, reason : String, restart = true, ask = true) : Answer
       kept.each do |target, copy|
         if copy
           raise "the kept copy of #{target} is gone" unless @tree.copy(copy, target)
@@ -419,26 +444,36 @@ module GatewayInstaller
         end
       end
       unless restart
-        return Answer.new(move_id, "rolled_back", "#{reason}; daemon-reload failed", nil, previous, "absent") unless @system.daemon_reload
-        return Answer.new(move_id, "rolled_back", reason, previous.try(&.copy_with(key_scope: "absent")), previous, "absent")
+        return Answer.new(move_id, "rolled_back", "#{reason}; daemon-reload failed", nil, previous, "unchecked") unless @system.daemon_reload
+        return Answer.new(move_id, "rolled_back", reason, previous, previous, "unchecked")
       end
       if again = restart_and_check(plugin_id, previous.try(&.plugin_version))
-        return Answer.new(move_id, "rolled_back", "#{reason}; the previous version failed its check too: #{again}", nil, previous, "absent")
+        return Answer.new(move_id, "rolled_back", "#{reason}; the previous version failed its check too: #{again}", nil, previous, "unchecked")
       end
-      canary = read_canary rescue nil
-      scope = canary && scope_fault(canary).nil? ? "live" : "absent"
-      Answer.new(move_id, "rolled_back", reason, previous.try(&.copy_with(key_scope: scope)), previous, scope)
+      Answer.new(move_id, "rolled_back", reason, previous, previous, ask ? scope_of(previous) : "unchecked")
+    end
+
+    # Whether a version that passed its check has a live key scope. Only a
+    # plugin with one is asked, so the sentinel never goes through a plugin
+    # that would let it reach a login.
+    private def scope_of(running : Running?) : String
+      return "unchecked" unless running && scoped?(running.plugin_version)
+      canary = (read_canary rescue nil) || return "unchecked"
+      scope_fault(canary) ? "absent" : "live"
+    rescue
+      "absent"
     end
 
     # A move cut off midway (a crash, a reboot) left its marker: put the
     # previous version back and record the move as interrupted. At boot the
-    # proxy has not started unless something started it by hand.
+    # proxy has not started unless something started it by hand, and the
+    # boot unit does not wait on the canary.
     private def recover(at_boot = false) : Answer?
       return unless json = @tree.read(MARKER)
       marker = Marker.from_json(json)
       unless @tree.exists?(record_path(marker.move_id))
         restart = !at_boot || (@system.unit_state.try(&.first) || 0) > 0
-        answer = roll_back(marker.move_id, marker.kept, marker.plugin_id, marker.previous, "interrupted", restart)
+        answer = roll_back(marker.move_id, marker.kept, marker.plugin_id, marker.previous, "interrupted", restart, ask: !at_boot)
       end
       finish(marker.move_id, answer)
       answer
@@ -449,7 +484,8 @@ module GatewayInstaller
     private def finish(move_id : String, answer : Answer?) : Nil
       if answer && answer.result != "refused"
         if running = answer.running
-          @tree.write(CURRENT, running.to_json, Owner.root(0o644))
+          json = JSON.parse(running.to_json).as_h.merge({"key_scope" => JSON::Any.new(answer.key_scope)})
+          @tree.write(CURRENT, json.to_json, Owner.root(0o644))
         else
           @tree.delete(CURRENT)
         end
@@ -636,16 +672,13 @@ module GatewayInstaller
     end
 
     # Why the key scope is not live, or nil when it is: it refuses the canary
-    # with its own 403. Only the status and the error type are read, and the
-    # type only when it is a plain word other than the key, so a reason never
-    # carries the key.
+    # with its own 403. The reason is the status alone: the body is the
+    # proxy's, and could echo the key.
     private def scope_fault(canary : Canary) : String?
       status, body = @system.canary(canary.url, canary.key, canary.model) ||
                      return "no answer within #{CANARY_WITHIN.total_seconds.to_i} s"
       type = JSON.parse(body)["error"]["type"].as_s? rescue nil
-      return if status == 403 && type == "key_scope"
-      type = nil unless type.try(&.matches?(/\A[a-z_]{1,64}\z/)) && type != canary.key
-      type ? "#{status} #{type}" : status.to_s
+      status.to_s unless status == 403 && type == "key_scope"
     end
 
     # Whether a plugin version has the key scope. One that cannot be read is
@@ -687,9 +720,13 @@ module GatewayInstaller
     end
 
     private def models_url : String?
-      "#{listen(config_yaml || return)}/v1/models"
+      "#{proxy_url}/v1/models"
     rescue
       nil
+    end
+
+    private def proxy_url : String
+      listen(config_yaml || raise Refused.new("config.yaml is unreadable"))
     end
 
     private def config_yaml : YAML::Any?
@@ -698,12 +735,23 @@ module GatewayInstaller
     end
 
     # Where the proxy listens: server.host and server.port, or the legacy
-    # host and port.
+    # host and port. The proxy's user writes config.yaml, and the canary
+    # carries the sentinel, so the address must be an IP literal of this
+    # host's own: never a name to resolve, never another host.
     private def listen(config : YAML::Any) : String
-      host = (config.dig?("server", "host") || config["host"]?).try(&.as_s?).presence || "127.0.0.1"
+      host = (config.dig?("server", "host") || config["host"]?).try(&.as_s?) || ""
       port = (config.dig?("server", "port") || config["port"]?).try(&.as_i?) || 8317
-      host = "[#{host}]" if host.includes?(':')
-      "http://#{host}:#{port}"
+      raise Refused.new("config.yaml's port is not a port") unless 1 <= port <= 65535
+      address = begin
+        Socket::IPAddress.new(host.empty? ? "0.0.0.0" : host.lchop('[').rchop(']'), port)
+      rescue Socket::Error
+        raise Refused.new("config.yaml's host is not an IP address")
+      end
+      address = Socket::IPAddress.new(address.family.inet6? ? "::1" : "127.0.0.1", port) if address.unspecified?
+      unless address.loopback? || @system.local?(address)
+        raise Refused.new("config.yaml's host is not an address of this host")
+      end
+      address.family.inet6? ? "http://[#{address.address}]:#{port}" : "http://#{address.address}:#{port}"
     end
 
     private def prepare_dirs : Nil
