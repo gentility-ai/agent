@@ -1,5 +1,9 @@
 # Puts back the previous gateway bundle when a move was cut off midway (a
 # reboot, a crash), before the proxy starts on half-installed files.
+#
+# Before= orders the proxy after this unit without Requires=, so cliproxyapi
+# still starts when recovery fails or times out: on whatever files are there,
+# with the marker kept for the next helper run.
 [Unit]
 Description=Put back a gateway bundle a cut-off move left half installed
 Before=cliproxyapi.service
@@ -7,6 +11,8 @@ ConditionPathExists=/var/lib/gentility-gateway/in-flight.json
 
 [Service]
 Type=oneshot
+# A oneshot waits forever by default, and the proxy waits on it.
+TimeoutStartSec=2min
 ExecStart=/usr/libexec/gentility/gentility-gateway-install --recover
 
 [Install]

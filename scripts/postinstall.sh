@@ -86,7 +86,7 @@ fi
 systemctl daemon-reload
 systemctl enable gentility
 if [ -f /etc/systemd/system/gentility-gateway-recover.service ]; then
-    systemctl enable gentility-gateway-recover.service
+    systemctl enable gentility-gateway-recover.service 2>/dev/null || true
 fi
 
 # Check if service was running before upgrade and restart it
