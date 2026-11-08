@@ -49,6 +49,7 @@ require "./agent/websocket_writer"
 require "./agent/egress/dialer"
 require "./agent/egress/stream"
 require "./agent/egress/manager"
+require "./agent/gateway"
 
 # Read version from VERSION file at compile time
 VERSION = {{ read_file("VERSION").strip }}
@@ -1125,6 +1126,8 @@ class GentilityAgent
           "error"   => ex.message || "Decryption failed",
         }
       end
+    when "gateway_install"
+      Gateway.install(params)
     else
       {"error" => "Unknown command: #{command}"}
     end
@@ -1296,6 +1299,9 @@ class GentilityAgent
     if @egress_enabled
       status = status.merge({"egress" => {"enabled" => true}})
     end
+
+    # What gateway bundle runs here, or null on a host without one.
+    status = status.merge({"gateway" => Gateway.current})
 
     send_message({
       "type"   => "agent.status",
