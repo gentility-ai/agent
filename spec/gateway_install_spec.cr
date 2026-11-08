@@ -31,16 +31,39 @@ module TarWriter
   end
 end
 
-# A host whose cliproxyapi "runs" whatever plugin is installed at restart: a
-# plugin file reading "plugin <version>" registers, anything else does not.
+# A host whose cliproxyapi "runs" whatever the drop-in and plugin name at
+# restart: a plugin file reading "plugin <version>" registers, anything else
+# does not, and the process runs the binary the drop-in names.
 class FakeSystem < GatewayInstaller::System
   getter fetches = 0
   getter restarts = 0
   getter clock = Time.utc(2026, 11, 8)
+  getter isolated_with : Array(String)? = nil
   property bundles = {} of String => Bytes
+  property isolated = true
+  # The process keeps running the old binary, as when the unit was not reloaded.
+  property stale_exe = false
+  # The process falls over and systemd restarts it, again and again.
+  property flapping = false
+  # The journal cannot be read after this restart.
+  property journal_fails_at : Int32? = nil
+  # Called at each restart, with its number.
+  property on_restart : Proc(Int32, Nil)? = nil
   @journal = ""
+  @pid = 100_i64
+  @nrestarts = 0_i64
+  @exe : String? = "/opt/cliproxyapi/8.0.47/cli-proxy-api"
 
   def initialize(@root : String)
+  end
+
+  def isolated?(move_id : String) : Bool
+    @isolated
+  end
+
+  def isolate(args : Array(String)) : {Int32, String}
+    @isolated_with = args
+    {0, %({"from":"the move unit"})}
   end
 
   def fetch(url : String, dest : String) : Nil
@@ -54,6 +77,9 @@ class FakeSystem < GatewayInstaller::System
 
   def restart : Bool
     @restarts += 1
+    @on_restart.try &.call(@restarts)
+    @pid += 1
+    @exe = File.read(@root + GatewayInstaller::DROP_IN)[GatewayInstaller::PROXY_PATH]? unless @stale_exe
     plugin = File.read("#{@root}#{GatewayInstaller::PLUGIN_DIR}/gentility-usage.so")
     @journal = if version = plugin.lchop?("plugin ")
                  "plugin registered plugin_id=gentility-usage name=usage version=#{version}\n" \
@@ -64,7 +90,17 @@ class FakeSystem < GatewayInstaller::System
     true
   end
 
+  def unit_state : {Int64, Int64}?
+    @nrestarts += 1 if @flapping
+    {@pid, @nrestarts}
+  end
+
+  def exe(pid : Int64) : String?
+    @exe
+  end
+
   def journal_since(since : Time) : String
+    raise IO::Error.new("journalctl: no such file") if @restarts == @journal_fails_at
     @journal
   end
 
@@ -107,14 +143,16 @@ def bundle(key : Ed25519::SigningKey,
            signing_key = key,
            sig_key_id = key_id(key),
            shipped_plugin : String? = nil,
-           extra = [] of {String, String}) : Bytes
-  archive = String.new(gzip([{"cli-proxy-api", "proxy 8.0.60"}, {"LICENSE", "MIT"}]))
+           extra = [] of {String, String},
+           upstream = "8.0.60",
+           proxy = "proxy #{upstream}") : Bytes
+  archive = String.new(gzip([{"cli-proxy-api", proxy}, {"LICENSE", "MIT"}]))
   manifest = {
     "kind"     => kind,
     "format"   => format,
-    "bundle"   => "8.0.60-0.2.0",
-    "upstream" => {"repo" => "router-for-me/CLIProxyAPI", "version" => "8.0.60",
-                   "archive" => "CLIProxyAPI_8.0.60_linux_amd64.tar.gz", "sha256" => sha256(archive)},
+    "bundle"   => "#{upstream}-0.2.0",
+    "upstream" => {"repo" => "router-for-me/CLIProxyAPI", "version" => upstream,
+                   "archive" => "CLIProxyAPI_#{upstream}_linux_amd64.tar.gz", "sha256" => sha256(archive)},
     "plugin" => {"id" => "gentility-usage", "version" => "0.2.0", "commit" => "abc",
                  "file" => "gentility-usage.so", "sha256" => sha256(plugin)},
     "unknown_field" => "ignored",
@@ -123,7 +161,7 @@ def bundle(key : Ed25519::SigningKey,
   TarWriter.build([
     {"manifest.json", manifest},
     {"manifest.sig", sig},
-    {"CLIProxyAPI_8.0.60_linux_amd64.tar.gz", archive},
+    {"CLIProxyAPI_#{upstream}_linux_amd64.tar.gz", archive},
     {"gentility-usage.so", shipped_plugin || plugin},
   ] + extra)
 end
@@ -224,7 +262,8 @@ describe GatewayInstaller::Installer do
   it "waits up to the check's deadline before rolling back" do
     with_host do |root, key, system, installer|
       install(installer, system, bundle(key, plugin: "broken"))
-      (system.clock - Time.utc(2026, 11, 8)).should eq(60.seconds)
+      # 60 s for the new version's check, then the previous one's 15 s settle.
+      (system.clock - Time.utc(2026, 11, 8)).should eq(75.seconds)
     end
   end
 
@@ -234,6 +273,171 @@ describe GatewayInstaller::Installer do
       _, answer = install(installer, system, bundle(key, plugin: "broken"))
       answer["result"].should eq("rolled_back")
       answer["reason"].as_s.should contain("the previous version failed its check too")
+      answer["running"].raw.should be_nil
+      answer["previous"]["bundle"].should eq("8.0.47-0.1.0")
+    end
+  end
+
+  it "runs the move in its own unit when started anywhere else" do
+    with_host do |root, key, system, installer|
+      system.isolated = false
+      status, output = installer.run([MOVE, URL, "a" * 64])
+      {status, output}.should eq({0, %({"from":"the move unit"})})
+      system.isolated_with.should eq([MOVE, URL, "a" * 64])
+      Dir.exists?("#{root}/var/lib/gentility-gateway/moves").should be_false
+    end
+  end
+
+  describe "fails the check, and rolls back, when" do
+    it "the proxy runs a binary other than the one the drop-in names" do
+      with_host do |root, key, system, installer|
+        system.stale_exe = true
+        _, answer = install(installer, system, bundle(key))
+        answer["result"].should eq("rolled_back")
+        answer["reason"].as_s.should start_with(
+          "cliproxyapi runs /opt/cliproxyapi/8.0.47/cli-proxy-api, not /opt/cliproxyapi/8.0.60/cli-proxy-api")
+        File.read(root + GatewayInstaller::DROP_IN).should eq(DROPIN)
+      end
+    end
+
+    it "the proxy restarts after passing" do
+      with_host do |root, key, system, installer|
+        system.flapping = true
+        _, answer = install(installer, system, bundle(key))
+        answer["result"].should eq("rolled_back")
+        answer["reason"].as_s.should start_with("cliproxyapi restarted within 15 s of passing its check")
+      end
+    end
+
+    it "config.yaml is not a mapping" do
+      with_host do |root, key, system, installer|
+        system.on_restart = ->(n : Int32) { File.write(root + GatewayInstaller::CONFIG, "- not\n- a mapping\n") if n == 1 }
+        _, answer = install(installer, system, bundle(key))
+        answer["result"].should eq("rolled_back")
+        answer["reason"].as_s.should start_with("config.yaml is unreadable")
+        File.read(root + GatewayInstaller::CONFIG).should eq("host: \"::1\"\nport: 8317\n")
+      end
+    end
+
+    it "the check itself raises" do
+      with_host do |root, key, system, installer|
+        system.journal_fails_at = 1
+        _, answer = install(installer, system, bundle(key))
+        answer["result"].should eq("rolled_back")
+        answer["reason"].as_s.should start_with("the check could not run: journalctl: no such file")
+        answer["running"]["bundle"].should eq("8.0.47-0.1.0")
+        File.read(root + GatewayInstaller::DROP_IN).should eq(DROPIN)
+      end
+    end
+  end
+
+  describe "a move cut off midway" do
+    it "is rolled back by the next helper run, which records it as interrupted" do
+      with_host do |root, key, system, installer|
+        # The host as a helper killed at the restart leaves it: switched, with
+        # its marker written and no record.
+        cut = "#{root}-cut"
+        system.on_restart = ->(n : Int32) { FileUtils.cp_r(root, cut) if n == 1; nil }
+        install(installer, system, bundle(key))
+        begin
+          File.read(cut + GatewayInstaller::DROP_IN).should contain("8.0.60")
+          File.exists?(cut + GatewayInstaller::MARKER).should be_true
+
+          later = FakeSystem.new(cut)
+          next_move = "019a5b2c-0000-7000-8000-000000000002"
+          _, answer = install(GatewayInstaller::Installer.new(later, cut), later, bundle(key, plugin: "broken"), move: next_move)
+
+          interrupted = JSON.parse(File.read("#{cut}/var/lib/gentility-gateway/moves/#{MOVE}.json"))
+          interrupted["result"].should eq("rolled_back")
+          interrupted["reason"].should eq("interrupted")
+          interrupted["running"]["bundle"].should eq("8.0.47-0.1.0")
+          File.exists?(cut + GatewayInstaller::MARKER).should be_false
+          # The next move then ran from the restored host, and rolled back to it.
+          answer["result"].should eq("rolled_back")
+          answer["previous"]["bundle"].should eq("8.0.47-0.1.0")
+          File.read(cut + GatewayInstaller::DROP_IN).should eq(DROPIN)
+          File.read("#{cut}#{GatewayInstaller::PLUGIN_DIR}/gentility-usage.so").should eq("plugin 0.1.0")
+          File.exists?(cut + "/opt/cliproxyapi/8.0.60/cli-proxy-api").should be_false
+        ensure
+          FileUtils.rm_rf(cut)
+        end
+      end
+    end
+
+    it "answers failed, keeping its marker, when the roll back cannot finish" do
+      with_host do |root, key, system, installer|
+        system.on_restart = ->(n : Int32) { File.delete("#{root}/var/lib/gentility-gateway/previous/gentility-usage.so") if n == 1 }
+        status, answer = install(installer, system, bundle(key, plugin: "broken"))
+        status.should eq(1)
+        answer["result"].should eq("failed")
+        answer["running"].raw.should be_nil
+        File.exists?(root + GatewayInstaller::MARKER).should be_true
+        File.exists?("#{root}/var/lib/gentility-gateway/moves/#{MOVE}.json").should be_false
+      end
+    end
+  end
+
+  describe "a plugin-only move (the same upstream version)" do
+    it "leaves the running proxy binary alone when its bytes match" do
+      with_host do |root, key, system, installer|
+        _, answer = install(installer, system, bundle(key, upstream: "8.0.47"))
+        answer["result"].should eq("moved")
+        File.exists?("#{root}/var/lib/gentility-gateway/previous/cli-proxy-api").should be_false
+        File.read(root + "/opt/cliproxyapi/8.0.47/cli-proxy-api").should eq("proxy 8.0.47")
+      end
+    end
+
+    it "keeps and restores the proxy binary when its bytes differ" do
+      with_host do |root, key, system, installer|
+        _, answer = install(installer, system, bundle(key, upstream: "8.0.47", proxy: "rebuilt 8.0.47", plugin: "broken"))
+        answer["result"].should eq("rolled_back")
+        File.read(root + "/opt/cliproxyapi/8.0.47/cli-proxy-api").should eq("proxy 8.0.47")
+      end
+    end
+  end
+
+  describe "never follows a link the proxy's user could plant:" do
+    it "a plugin that is a link is refused before the host changes" do
+      with_host do |root, key, system, installer|
+        outside = "#{root}/root-only"
+        File.write(outside, "secret")
+        plugin = "#{root}#{GatewayInstaller::PLUGIN_DIR}/gentility-usage.so"
+        File.delete(plugin)
+        File.symlink(outside, plugin)
+        _, answer = install(installer, system, bundle(key))
+        answer["result"].should eq("refused")
+        answer["reason"].as_s.should start_with("could not keep the previous version")
+        File.read(outside).should eq("secret")
+        File.symlink?(plugin).should be_true
+        system.restarts.should eq(0)
+      end
+    end
+
+    it "a plugin dir that is a link is refused" do
+      with_host do |root, key, system, installer|
+        outside = "#{root}/elsewhere"
+        Dir.mkdir(outside)
+        dir = "#{root}#{GatewayInstaller::PLUGIN_DIR}"
+        FileUtils.mv(dir, "#{root}/moved-away")
+        File.symlink(outside, dir)
+        _, answer = install(installer, system, bundle(key))
+        answer["result"].should eq("refused")
+        Dir.children(outside).should be_empty
+      end
+    end
+
+    it "a config.yaml swapped for a link mid-move is replaced, not written through" do
+      with_host do |root, key, system, installer|
+        outside = "#{root}/root-only"
+        File.write(outside, "secret")
+        config = root + GatewayInstaller::CONFIG
+        system.on_restart = ->(n : Int32) { (File.delete(config); File.symlink(outside, config)) if n == 1; nil }
+        _, answer = install(installer, system, bundle(key, plugin: "broken"))
+        answer["result"].should eq("rolled_back")
+        File.read(outside).should eq("secret")
+        File.symlink?(config).should be_false
+        File.read(config).should eq("host: \"::1\"\nport: 8317\n")
+      end
     end
   end
 
@@ -277,6 +481,7 @@ describe GatewayInstaller::Installer do
         File.write(root + GatewayInstaller::DROP_IN, "[Service]\nExecStart=/usr/bin/other\n")
         _, answer = install(installer, system, bundle(key))
         answer["reason"].should eq("the drop-in names no proxy binary")
+        system.fetches.should eq(0)
         system.restarts.should eq(0)
       end
     end
