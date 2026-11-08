@@ -6,17 +6,17 @@ shards:
 
   base58:
     git: https://github.com/wyhaines/base58.cr.git
-    version: 0.2.2
+    version: 0.2.2+git.commit.9439d5d8cc2f2d4f6888eab56dab0e8b29dd8a6b
 
   crotp:
     git: https://github.com/philnash/crotp.git
-    version: 1.0.0
+    version: 1.0.0+git.commit.dde7a22abb152d93cfd2283c363a7430c81ec9a3
 
   ed25519:
     git: https://github.com/spider-gazelle/ed25519.git
-    version: 1.1.0
+    version: 1.1.0+git.commit.c5b25bdc26559ce0c781947d4f82e4895ce7d3b1
 
   qr-code:
     git: https://github.com/spider-gazelle/qr-code.git
-    version: 1.0.3
+    version: 1.0.3+git.commit.f221da3408824a12b2dde7ab982988799be8e915
 
