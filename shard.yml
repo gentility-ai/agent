@@ -8,13 +8,15 @@ targets:
 dependencies:
   crotp:
     github: philnash/crotp
+    commit: dde7a22abb152d93cfd2283c363a7430c81ec9a3 # v1.0.0
   qr-code:
     github: spider-gazelle/qr-code
+    commit: f221da3408824a12b2dde7ab982988799be8e915 # v1.0.3
   ed25519:
     github: spider-gazelle/ed25519
-    version: ~> 1.0
+    commit: c5b25bdc26559ce0c781947d4f82e4895ce7d3b1 # v1.1.0
   base58:
     github: wyhaines/base58.cr
-    version: ~> 0.2
+    commit: 9439d5d8cc2f2d4f6888eab56dab0e8b29dd8a6b # v0.2.2
 
 crystal: ">= 1.0.0"
