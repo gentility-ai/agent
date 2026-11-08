@@ -5,8 +5,10 @@ export LC_ALL=en_US.UTF-8
 export LANG=en_US.UTF-8
 export LC_CTYPE=en_US.UTF-8
 
-# $1 is "upgrade" during upgrades, "remove" or "purge" during removal
+# $1 is "upgrade" during upgrades, "remove" or "purge" during removal; RPM
+# passes 1 for an upgrade and 0 for an erase.
 action="${1:-remove}"
+[ "$action" = "0" ] && action="remove"
 
 # Reload systemd after removing service file
 systemctl daemon-reload

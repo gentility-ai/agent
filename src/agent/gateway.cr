@@ -13,10 +13,14 @@ module Gateway
     return {"error" => "Missing move_id, bundle_url or sha256 parameter"} if words.any?(&.nil?)
 
     output = IO::Memory.new
-    status = Process.run(helper[0], helper[1..] + words.map(&.not_nil!).to_a,
-      output: output, error: Process::Redirect::Inherit)
+    error = IO::Memory.new
+    status = Process.run(helper[0], helper[1..] + words.map(&.not_nil!).to_a, output: output, error: error)
     answer = JSON.parse(output.to_s) rescue nil
-    raise "Gateway helper gave no answer (exit #{status.exit_code})" unless answer.try(&.as_h?)
+    unless answer.try(&.as_h?)
+      said = error.to_s.strip
+      said = "…#{said[-400..]}" if said.size > 400
+      raise "Gateway helper gave no answer (exit #{status.exit_code})#{": #{said}" unless said.empty?}"
+    end
     answer
   end
 

@@ -694,6 +694,9 @@ class GentilityAgent
       rescue ex : Exception
         send_error(request_id, ex.message || "Unknown error")
       end
+      # A move can land after the server stopped waiting for its answer; the
+      # status frame tells it what runs either way.
+      send_status if command == "gateway_install"
     end
   end
 

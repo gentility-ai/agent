@@ -19,8 +19,8 @@ describe Gateway do
     end
 
     it "raises when the helper gives no JSON answer" do
-      expect_raises(Exception, "Gateway helper gave no answer (exit 1)") do
-        Gateway.install(params, ["/bin/sh", "-c", "echo sudo: a password is required; exit 1"])
+      expect_raises(Exception, "Gateway helper gave no answer (exit 1): sudo: a password is required") do
+        Gateway.install(params, ["/bin/sh", "-c", "echo sudo: a password is required >&2; exit 1"])
       end
     end
   end
