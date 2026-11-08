@@ -1,0 +1,2 @@
+gentility ALL=(root) NOPASSWD: /usr/libexec/gentility/gentility-gateway-install
+Defaults!/usr/libexec/gentility/gentility-gateway-install env_reset, !setenv

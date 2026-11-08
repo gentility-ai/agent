@@ -16,6 +16,7 @@ if systemctl is-active --quiet gentility; then
 fi
 
 # Only disable on actual removal, not upgrade
-if [ "$action" = "remove" ]; then
+if [ "$action" = "remove" ] || [ "$action" = "0" ]; then
     systemctl disable gentility 2>/dev/null || true
+    systemctl disable gentility-gateway-recover.service 2>/dev/null || true
 fi

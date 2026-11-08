@@ -26,6 +26,7 @@ build-dev: install-deps
     @echo "Building {{binary_name}} v{{version}} for development..."
     @mkdir -p {{bin_dir}}
     crystal build src/agent.cr -o {{bin_dir}}/{{binary_name}}
+    crystal build src/gateway_install.cr -o {{bin_dir}}/gentility-gateway-install
     @echo "Development binary built: {{bin_dir}}/{{binary_name}}"
 
 # CI publishes .deb (amd64/arm64), .rpm (x86_64/aarch64), and .tar.gz
