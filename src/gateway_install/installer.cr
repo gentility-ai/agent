@@ -669,14 +669,22 @@ module GatewayInstaller
     end
 
     private def main_log_size : Int32
-      (@tree.read(MAIN_LOG) || "").bytesize
+      main_log.bytesize
     end
 
     # What the proxy wrote to main.log after its first `from` bytes; all of it
     # when the file is shorter, as after a rotation.
     private def main_log_since(from : Int32) : String
-      log = @tree.read(MAIN_LOG) || ""
+      log = main_log
       log.bytesize < from ? log : log.byte_slice(from)
+    end
+
+    # main.log only seconds the journal, so one the helper cannot read (a link
+    # the proxy's user left, say) reads as empty rather than ending the check.
+    private def main_log : String
+      @tree.read(MAIN_LOG) || ""
+    rescue
+      ""
     end
 
     private def registered?(line : String, plugin_id : String, version : String?) : Bool

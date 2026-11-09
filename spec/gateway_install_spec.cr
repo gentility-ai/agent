@@ -55,9 +55,6 @@ class FakeSystem < GatewayInstaller::System
   property flapping = false
   # The journal lacks the config watcher's line after this restart.
   property journal_without_watcher_at : Int32? = nil
-  # The proxy logs to main.log, so its watcher's line is there and not in the
-  # journal, after this restart.
-  property watcher_in_main_log_at : Int32? = nil
   # The journal cannot be read after this restart.
   property journal_fails_at : Int32? = nil
   # Called at each restart, with its number.
@@ -122,10 +119,6 @@ class FakeSystem < GatewayInstaller::System
   def journal_since(since : Time) : String
     raise IO::Error.new("journalctl: no such file") if @restarts == @journal_fails_at
     return @journal.sub(GatewayInstaller::WATCHER, "") if @restarts == @journal_without_watcher_at
-    if @restarts == @watcher_in_main_log_at
-      File.write(@root + GatewayInstaller::MAIN_LOG, "[info ] #{GatewayInstaller::WATCHER}\n", mode: "a")
-      return @journal.sub(GatewayInstaller::WATCHER, "")
-    end
     @journal
   end
 
@@ -291,13 +284,38 @@ describe GatewayInstaller::Installer do
     end
   end
 
-  it "finds the config watcher's line in main.log when the proxy logs to a file" do
+  {"appends to it" => "a", "rotates it" => "w"}.each do |what, mode|
+    it "finds the config watcher's line in main.log when the proxy logs to a file and #{what}" do
+      with_host do |root, key, system, installer|
+        log = root + GatewayInstaller::MAIN_LOG
+        Dir.mkdir_p(File.dirname(log))
+        File.write(log, "[info ] an earlier start\n" * 100)
+        system.journal_without_watcher_at = 1
+        system.on_restart = ->(n : Int32) { File.write(log, "[info ] #{GatewayInstaller::WATCHER}\n", mode: mode) if n == 1; nil }
+        _, answer = install(installer, system, bundle(key))
+        answer["result"].should eq("moved")
+      end
+    end
+  end
+
+  it "restarts the previous version, and says what runs, when main.log is a link" do
     with_host do |root, key, system, installer|
-      Dir.mkdir_p(File.dirname(root + GatewayInstaller::MAIN_LOG))
-      File.write(root + GatewayInstaller::MAIN_LOG, "[info ] an earlier start\n")
-      system.watcher_in_main_log_at = 1
+      log = root + GatewayInstaller::MAIN_LOG
+      Dir.mkdir_p(File.dirname(log))
+      File.write(log, "")
+      system.journal_without_watcher_at = 1
+      system.on_restart = ->(n : Int32) do
+        if n == 1
+          File.delete(log)
+          File.symlink(root + GatewayInstaller::CONFIG, log)
+        end
+        nil
+      end
       _, answer = install(installer, system, bundle(key))
-      answer["result"].should eq("moved")
+      answer["result"].should eq("rolled_back")
+      answer["reason"].as_s.should eq("the config watcher did not start")
+      answer["running"]["plugin_version"].should eq("0.1.0")
+      system.restarts.should eq(2)
     end
   end
 
