@@ -39,6 +39,10 @@ module GatewayInstaller
   # The boot unit's word: put back what a cut-off move left, before the proxy starts.
   RECOVER = "--recover"
   WATCHER = "file watcher started for config and auth directory changes"
+  # With logging-to-file set, the proxy's own lines (the watcher's among them)
+  # go here, not to the journal, once its config applies: logs/main.log in its
+  # working directory, which it rotates at 10 MB.
+  MAIN_LOG = "/var/lib/cliproxyapi/logs/main.log"
   # The gentility-usage plugin's harness prefixes (the gateway repo's
   # contract/key_prefixes.json): its key scope refuses a key with none of them.
   KEY_PREFIXES  = {"omp_", "claude_", "codex_"}
@@ -619,17 +623,18 @@ module GatewayInstaller
     private def restart_and_check(plugin_id : String, version : String?) : String?
       return "daemon-reload failed" unless @system.daemon_reload
       since = @system.now
+      log_from = main_log_size
       return "restart failed" unless @system.restart
-      check(plugin_id, version, since)
+      check(plugin_id, version, since, log_from)
     rescue ex
       "the check could not run: #{ex.message}"
     end
 
     # 6. Check, until it passes or the time is up; then again after a pause,
     # so a proxy that comes up and falls over does not pass.
-    private def check(plugin_id : String, version : String?, since : Time) : String?
+    private def check(plugin_id : String, version : String?, since : Time, log_from : Int32) : String?
       deadline = @system.ticks + @check_within
-      until (reason = check_once(plugin_id, version, since)).nil?
+      until (reason = check_once(plugin_id, version, since, log_from)).nil?
         return reason if @system.ticks >= deadline
         @system.sleep(@poll_every)
       end
@@ -641,14 +646,16 @@ module GatewayInstaller
       nil
     end
 
-    private def check_once(plugin_id : String, version : String?, since : Time) : String?
+    private def check_once(plugin_id : String, version : String?, since : Time, log_from : Int32) : String?
       journal = @system.journal_since(since)
       unless journal.each_line.any? { |line| registered?(line, plugin_id, version) }
         return "plugin #{plugin_id} #{version} did not register".squeeze(' ')
       end
       return "the API server did not start" unless journal.includes?("API server started successfully")
       # Until its watcher runs, a management key write is saved but never goes live.
-      return "the config watcher did not start" unless journal.includes?(WATCHER)
+      unless journal.includes?(WATCHER) || main_log_since(log_from).includes?(WATCHER)
+        return "the config watcher did not start"
+      end
       pid = @system.unit_state.try(&.first) || 0_i64
       return "cliproxyapi is not running" unless pid > 0
       proxy = @tree.read(DROP_IN).try(&.[PROXY_PATH]?)
@@ -659,6 +666,17 @@ module GatewayInstaller
       status = @system.models_status(url)
       return "/v1/models answered #{status || "nothing"}" unless {200, 401}.includes?(status)
       nil
+    end
+
+    private def main_log_size : Int32
+      (@tree.read(MAIN_LOG) || "").bytesize
+    end
+
+    # What the proxy wrote to main.log after its first `from` bytes; all of it
+    # when the file is shorter, as after a rotation.
+    private def main_log_since(from : Int32) : String
+      log = @tree.read(MAIN_LOG) || ""
+      log.bytesize < from ? log : log.byte_slice(from)
     end
 
     private def registered?(line : String, plugin_id : String, version : String?) : Bool
