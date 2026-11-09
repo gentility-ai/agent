@@ -284,6 +284,41 @@ describe GatewayInstaller::Installer do
     end
   end
 
+  {"appends to it" => "a", "rotates it" => "w"}.each do |what, mode|
+    it "finds the config watcher's line in main.log when the proxy logs to a file and #{what}" do
+      with_host do |root, key, system, installer|
+        log = root + GatewayInstaller::MAIN_LOG
+        Dir.mkdir_p(File.dirname(log))
+        File.write(log, "[info ] an earlier start\n" * 100)
+        system.journal_without_watcher_at = 1
+        system.on_restart = ->(n : Int32) { File.write(log, "[info ] #{GatewayInstaller::WATCHER}\n", mode: mode) if n == 1; nil }
+        _, answer = install(installer, system, bundle(key))
+        answer["result"].should eq("moved")
+      end
+    end
+  end
+
+  it "restarts the previous version, and says what runs, when main.log is a link" do
+    with_host do |root, key, system, installer|
+      log = root + GatewayInstaller::MAIN_LOG
+      Dir.mkdir_p(File.dirname(log))
+      File.write(log, "")
+      system.journal_without_watcher_at = 1
+      system.on_restart = ->(n : Int32) do
+        if n == 1
+          File.delete(log)
+          File.symlink(root + GatewayInstaller::CONFIG, log)
+        end
+        nil
+      end
+      _, answer = install(installer, system, bundle(key))
+      answer["result"].should eq("rolled_back")
+      answer["reason"].as_s.should eq("the config watcher did not start")
+      answer["running"]["plugin_version"].should eq("0.1.0")
+      system.restarts.should eq(2)
+    end
+  end
+
   it "reports a null previous for the first move from a hand install" do
     with_host do |root, key, system, installer|
       File.delete(root + GatewayInstaller::CURRENT)
@@ -377,6 +412,17 @@ describe GatewayInstaller::Installer do
 
     it "the proxy's config watcher does not start" do
       with_host do |root, key, system, installer|
+        system.journal_without_watcher_at = 1
+        _, answer = install(installer, system, bundle(key))
+        answer["result"].should eq("rolled_back")
+        answer["reason"].as_s.should start_with("the config watcher did not start")
+      end
+    end
+
+    it "an earlier start's watcher line in main.log" do
+      with_host do |root, key, system, installer|
+        Dir.mkdir_p(File.dirname(root + GatewayInstaller::MAIN_LOG))
+        File.write(root + GatewayInstaller::MAIN_LOG, "[info ] #{GatewayInstaller::WATCHER}\n")
         system.journal_without_watcher_at = 1
         _, answer = install(installer, system, bundle(key))
         answer["result"].should eq("rolled_back")
