@@ -422,13 +422,6 @@ class GentilityAgent
       port: uri.port,
       path: "/agent/websocket",
       query: URI::Params.build do |params|
-        if @machine_key
-          # Machine key mode: send the full machine key
-          params.add "machine_key", @machine_key.not_nil!
-        elsif @oauth_token
-          # OAuth mode: send OAuth token
-          params.add "oauth_token", @oauth_token.not_nil!
-        end
         params.add "version", Protocol::CAPVER.to_s
         params.add "agent_version", VERSION
         params.add "security_mode", Security.mode
@@ -442,10 +435,14 @@ class GentilityAgent
       end
     )
 
-    # Log connection attempt (sanitized - no tokens in query string)
     Log.info { "Connecting to #{ws_uri.host}:#{ws_uri.port || 443}#{ws_uri.path}" }
 
-    websocket = AgentWebSocketConnector.open(ws_uri)
+    # The machine key or OAuth token travels in the Authorization header: the
+    # URL above carries no credential.
+    websocket = AgentWebSocketConnector.open(
+      ws_uri,
+      authorization: AgentWebSocketConnector.authorization(@machine_key, @oauth_token)
+    )
 
     # Set up message handler
     websocket.on_message do |message|

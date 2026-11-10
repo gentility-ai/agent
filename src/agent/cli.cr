@@ -657,7 +657,6 @@ class AgentProvisioner
       port: uri.port,
       path: "/agent/websocket",
       query: URI::Params.build do |params|
-        params.add "oauth_token", @oauth_token
         params.add "version", "2"
         params.add "agent_version", VERSION
       end
@@ -665,7 +664,13 @@ class AgentProvisioner
 
     debug_log("Connecting to WebSocket: #{ws_uri.host}:#{ws_uri.port}#{ws_uri.path}")
 
-    @websocket = HTTP::WebSocket.new(ws_uri)
+    # The OAuth token travels in the Authorization header, as the machine key
+    # does once provisioned (AgentWebSocketConnector.authorization): the URL
+    # carries no credential.
+    @websocket = HTTP::WebSocket.new(
+      ws_uri,
+      HTTP::Headers{"Authorization" => "Bearer #{@oauth_token}"}
+    )
 
     # Set up JSON message handler
     @websocket.not_nil!.on_message do |message|
