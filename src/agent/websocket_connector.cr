@@ -6,12 +6,25 @@ module AgentWebSocketConnector
   DEFAULT_HANDSHAKE_TIMEOUT = 15.seconds
   DEFAULT_WRITE_TIMEOUT     = 10.seconds
 
+  # The upgrade's Authorization value for the credential an agent holds: a
+  # provisioned machine's key, or the OAuth token a new agent provisions with.
+  # The credential goes in this header and never in the URL, because a URL is
+  # written to every access log between the agent and the server.
+  def authorization(machine_key : String?, oauth_token : String?) : String?
+    if machine_key
+      "Machine-Key #{machine_key}"
+    elsif oauth_token
+      "Bearer #{oauth_token}"
+    end
+  end
+
   def open(
     uri : URI,
     dns_timeout : Time::Span = DEFAULT_DNS_TIMEOUT,
     connect_timeout : Time::Span = DEFAULT_CONNECT_TIMEOUT,
     handshake_timeout : Time::Span = DEFAULT_HANDSHAKE_TIMEOUT,
-    write_timeout : Time::Span = DEFAULT_WRITE_TIMEOUT
+    write_timeout : Time::Span = DEFAULT_WRITE_TIMEOUT,
+    authorization : String? = nil
   ) : HTTP::WebSocket
     host = uri.hostname || raise ArgumentError.new("WebSocket URI is missing a host")
     path = uri.request_target
@@ -23,6 +36,7 @@ module AgentWebSocketConnector
     if (user = uri.user) && (password = uri.password)
       headers["Authorization"] = "Basic #{Base64.strict_encode("#{user}:#{password}")}"
     end
+    headers["Authorization"] = authorization if authorization
 
     transport = open_transport(host, port, tls, dns_timeout, connect_timeout, handshake_timeout)
 
