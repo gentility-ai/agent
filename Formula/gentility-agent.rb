@@ -2,7 +2,7 @@ class GentilityAgent < Formula
   desc "Daemon for Gentility AI remote access"
   homepage "https://gentility.ai"
   url "https://github.com/gentility-ai/agent.git",
-      tag: "v1.2.17"
+      tag: "v1.2.18"
   license "MIT"
 
   depends_on "crystal" => :build
