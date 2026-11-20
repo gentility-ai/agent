@@ -11,17 +11,8 @@ module AgentDatabase
     Log.debug { "Query: #{query}" }
 
     begin
-      # Use psql with environment variable to avoid password prompt.
-      # `-A --csv` emits a header row followed by RFC-4180 CSV; we parse it
-      # into both a `columns` list and a list-of-list `rows`. The header row
-      # is what the Elixir side needs to apply column-aware redaction.
-      escaped_query = query.gsub("\"", "\\\"").gsub("`", "\\`").gsub("$", "\\$")
-
-      psql_cmd = "PGPASSWORD='#{password || ""}' psql -h #{host} -p #{port}"
-      psql_cmd += " -U #{username}" if username
-      psql_cmd += " -d #{dbname} -A --csv -c \"#{escaped_query}\""
-
-      execute_db_command(psql_cmd, :csv, "PostgreSQL")
+      args, env = psql_invocation(host, port, dbname, query, username, password)
+      execute_db_command("psql", args, env, :csv, "PostgreSQL")
     rescue ex : Exception
       {
         "success"   => false,
@@ -39,13 +30,7 @@ module AgentDatabase
     Log.debug { "Query: #{query}" }
 
     begin
-      # `--batch --raw` emits tab-separated output. We deliberately omit
-      # `--skip-column-names` so the first line is the header row, which
-      # we use to populate `columns` for the Elixir redaction layer.
-      escaped_query = query.gsub("\"", "\\\"").gsub("`", "\\`").gsub("$", "\\$")
-      mysql_cmd = "mysql -h #{host} -P #{port} -D #{dbname} --batch --raw -e \"#{escaped_query}\""
-
-      execute_db_command(mysql_cmd, :tsv, "MySQL")
+      execute_db_command("mysql", mysql_args(host, port, dbname, query), {} of String => String, :tsv, "MySQL")
     rescue ex : Exception
       {
         "success"   => false,
@@ -57,15 +42,40 @@ module AgentDatabase
     end
   end
 
-  # Execute database command and parse results.
-  # `format` is `:csv` (RFC-4180 with quoted fields) or `:tsv` (tab-delimited).
-  private def self.execute_db_command(command : String, format : Symbol, db_type : String)
-    # Note: command logged at debug level only - may contain credentials in env vars
+  # Arguments and environment for one psql run. Every value is its own argv
+  # entry and the password travels in the environment, so nothing the server
+  # sends is ever parsed by a shell.
+  #
+  # `-A --csv` emits a header row followed by RFC-4180 CSV; we parse it into
+  # both a `columns` list and a list-of-list `rows`. The header row is what
+  # the Elixir side needs to apply column-aware redaction.
+  def self.psql_invocation(host : String, port : Int32, dbname : String, query : String, username : String?, password : String?) : Tuple(Array(String), Hash(String, String))
+    args = ["-h", host, "-p", port.to_s]
+    args << "-U" << username if username
+    args << "-d" << dbname << "-A" << "--csv" << "-c" << query
+
+    env = {} of String => String
+    env["PGPASSWORD"] = password if password
+    {args, env}
+  end
+
+  # `--batch --raw` emits tab-separated output. We deliberately omit
+  # `--skip-column-names` so the first line is the header row, which we use
+  # to populate `columns` for the Elixir redaction layer.
+  def self.mysql_args(host : String, port : Int32, dbname : String, query : String) : Array(String)
+    ["-h", host, "-P", port.to_s, "-D", dbname, "--batch", "--raw", "-e", query]
+  end
+
+  # Execute database command and parse results. The program is run directly
+  # (no shell). `format` is `:csv` (RFC-4180 with quoted fields) or `:tsv`
+  # (tab-delimited).
+  private def self.execute_db_command(program : String, args : Array(String), env : Hash(String, String), format : Symbol, db_type : String)
     Log.debug { "Executing DB command for #{db_type}" }
 
     process = Process.new(
-      command,
-      shell: true,
+      program,
+      args,
+      env: env,
       input: Process::Redirect::Close,
       output: Process::Redirect::Pipe,
       error: Process::Redirect::Pipe

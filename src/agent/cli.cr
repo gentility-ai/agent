@@ -2056,7 +2056,12 @@ def main
 
   access_key, server_url, nickname, environment = parse_arguments
 
-  agent = GentilityAgent.new(access_key, server_url, nickname, environment)
+  agent = begin
+    GentilityAgent.new(access_key, server_url, nickname, environment)
+  rescue ex : AgentPolicy::InvalidMode
+    STDERR.puts "Error: #{ex.message}"
+    exit 1
+  end
 
   # Handle graceful shutdown
   Signal::INT.trap do

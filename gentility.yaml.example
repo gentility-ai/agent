@@ -21,6 +21,11 @@ access_key: "your_token_here"
 # This will log all WebSocket message traffic
 # debug: false
 
+# OPTIONAL: Agent mode (default: full)
+# database = SQL queries only: no shell, file, gateway or egress commands.
+# Can also be set with GENTILITY_MODE=database.
+# agent_mode: database
+
 # Security configuration
 security:
   # Security mode: none, password, or totp (default: none)
