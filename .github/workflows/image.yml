@@ -1,0 +1,142 @@
+name: Container image
+
+# Builds the agent's container image on each architecture's own runner (a
+# Crystal release build under emulation takes far too long), then joins the
+# two into one multi-arch tag.
+#
+# Pull requests and master: build only, nothing is pushed.
+# Version tags (v*): push ghcr.io/gentility-ai/agent:<version> and :latest,
+# with a signed build-provenance attestation. Deployments should pin the
+# digest printed at the end of the publish job, not a tag.
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/gentility-ai/agent
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    name: Image ${{ matrix.arch }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          # Full history, so a tag can be checked against master below.
+          fetch-depth: 0
+
+      # Tags are not protected, so anyone who can push could tag a commit
+      # nobody reviewed. Publish only what is already on master.
+      - name: Refuse a tag that is not on master
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/master
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          provenance: false
+          # On a tag: push this architecture by digest only; the publish job
+          # gives it a name. Otherwise load it for the smoke test below.
+          outputs: ${{ startsWith(github.ref, 'refs/tags/v') && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.IMAGE) || 'type=docker,name=gentility-agent:ci' }}
+
+      - name: Smoke test (read-only root, no privileges)
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          set -euo pipefail
+          run() { docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges "$@"; }
+          run gentility-agent:ci version | grep -F "v$(cat VERSION)"
+          run --entrypoint sh gentility-agent:ci -c 'test "$(id -u)" = 10001 && psql --version && mysql --version && test "$GENTILITY_MODE" = database'
+
+      - name: Record digest
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: image-digest-${{ matrix.arch }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    name: Publish multi-arch image
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: image-digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create the multi-arch tags
+        id: manifest
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${REF_NAME#v}"
+          refs=()
+          for d in *; do refs+=("$IMAGE@sha256:$d"); done
+          docker buildx imagetools create -t "$IMAGE:$version" -t "$IMAGE:latest" "${refs[@]}"
+          digest=$(docker buildx imagetools inspect "$IMAGE:$version" --format '{{json .Manifest}}' | jq -r .digest)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "### \`$IMAGE@$digest\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true

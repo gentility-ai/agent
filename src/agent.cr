@@ -42,6 +42,7 @@ require "./protocol"
 require "./agent/security"
 require "./agent/crypto"
 require "./agent/config"
+require "./agent/policy"
 require "./agent/database"
 require "./agent/cli"
 require "./agent/websocket_connector"
@@ -89,6 +90,10 @@ class GentilityAgent
   @egress_allow_private_networks : Bool = false
   @egress_manager : AgentEgressManager?
 
+  # Which commands this agent runs at all (see AgentPolicy). Set by the
+  # operator in the config file or GENTILITY_MODE, never by the server.
+  getter mode : String = AgentPolicy::FULL
+
   def initialize(access_key : String, @server_url : String, @nickname : String, @environment : String = "prod")
     # Determine if this is a machine_key or oauth_token based on prefix
     if access_key.starts_with?("genkey-agent-")
@@ -105,9 +110,23 @@ class GentilityAgent
       puts "Using OAuth token authentication" if CLI.debug_mode
     end
 
+    load_mode
     load_security_config
     load_x25519_keys
     load_egress_config
+  end
+
+  # Raises AgentPolicy::InvalidMode on an unknown value, so a typo stops the
+  # agent instead of leaving it in full mode.
+  private def load_mode
+    path = AgentConfig.get_config_path
+    config = AgentConfig.load_config_from_file(path)
+    # An unreadable file could be hiding `agent_mode: database`.
+    raise AgentPolicy::InvalidMode.new("Cannot read the config file #{path}, so the agent mode is unknown") if config.nil? && File.exists?(path)
+    @mode = AgentPolicy.resolve(config)
+    if @mode == AgentPolicy::DATABASE
+      Log.info { "Database-only mode: shell, file, gateway and egress commands are refused" }
+    end
   end
 
   private def load_x25519_keys
@@ -203,6 +222,13 @@ class GentilityAgent
     egress_any = config["egress"]?
     egress = egress_any.try(&.as_h?)
     return unless egress
+
+    unless AgentPolicy.allows_egress?(@mode)
+      if egress[YAML::Any.new("enabled")]?.try(&.as_bool?)
+        Log.warn { "egress.enabled is set but ignored: the agent is in #{@mode} mode" }
+      end
+      return
+    end
 
     @egress_enabled = egress[YAML::Any.new("enabled")]?.try(&.as_bool?) || false
     @egress_allow_loopback = egress[YAML::Any.new("allow_loopback")]?.try(&.as_bool?) || false
@@ -686,7 +712,7 @@ class GentilityAgent
     # Execute command in background
     spawn do
       begin
-        result = execute_command(command, params)
+        result = run_command(command, params)
         send_response(request_id, result)
       rescue ex : Exception
         send_error(request_id, ex.message || "Unknown error")
@@ -753,6 +779,20 @@ class GentilityAgent
     end
   end
 
+  # Runs a server command if this agent's mode permits it. The only way into
+  # execute_command, so nothing reaches a handler without passing the policy.
+  def run_command(command : String, params : JSON::Any?)
+    unless AgentPolicy.allows?(@mode, command)
+      Log.warn { "Refused command #{command}: not available in #{@mode} mode" }
+      return {
+        "error" => "Command '#{command}' is not available: this agent runs in #{@mode} mode",
+        "code"  => "command_disabled",
+      }
+    end
+
+    execute_command(command, params)
+  end
+
   private def execute_command(command : String, params : JSON::Any?)
     case command
     when "ping"
@@ -801,7 +841,7 @@ class GentilityAgent
       password = params.try(&.["password"]?.try(&.to_s))
 
       if host && port && dbname && query
-        execute_psql_query(host, port, dbname, query, username, password)
+        execute_psql_query(host, port, dbname, query, username, password, read_only?(params))
       else
         {"error" => "Missing required parameters: host, port, dbname, query"}
       end
@@ -814,7 +854,7 @@ class GentilityAgent
       query = params.try(&.["query"]?.try(&.to_s))
 
       if host && port && dbname && query
-        execute_mysql_query(host, port, dbname, query)
+        execute_mysql_query(host, port, dbname, query, read_only?(params))
       else
         {"error" => "Missing required parameters: host, port, dbname, query"}
       end
@@ -844,7 +884,7 @@ class GentilityAgent
         password = creds["password"]?.try(&.as_s)
 
         if host && port && dbname
-          execute_psql_query(host, port, dbname, query, username, password)
+          execute_psql_query(host, port, dbname, query, username, password, read_only?(params))
         else
           {"error" => "Invalid stored credentials"}
         end
@@ -875,7 +915,7 @@ class GentilityAgent
         dbname = creds["database"]?.try(&.as_s)
 
         if host && port && dbname
-          execute_mysql_query(host, port, dbname, query)
+          execute_mysql_query(host, port, dbname, query, read_only?(params))
         else
           {"error" => "Invalid stored credentials"}
         end
@@ -1047,7 +1087,7 @@ class GentilityAgent
           password = creds["password"]?.try(&.as_s)
 
           if host && port && dbname
-            execute_psql_query(host, port, dbname, query, username, password)
+            execute_psql_query(host, port, dbname, query, username, password, read_only?(params))
           else
             {"error" => "Invalid decrypted credentials"}
           end
@@ -1080,7 +1120,7 @@ class GentilityAgent
           dbname = creds["database"]?.try(&.as_s)
 
           if host && port && dbname
-            execute_mysql_query(host, port, dbname, query)
+            execute_mysql_query(host, port, dbname, query, read_only?(params))
           else
             {"error" => "Invalid decrypted credentials"}
           end
@@ -1169,10 +1209,11 @@ class GentilityAgent
     {"error" => "Failed to check packages: #{ex.message}"}
   end
 
+  # The name comes from the server, so it never reaches a shell: only a bare
+  # program name is looked up on PATH.
   private def command_available?(command : String) : Bool
-    # Use 'which' to check if command is available
-    result = `which #{command} 2>/dev/null`.strip
-    !result.empty?
+    return false unless command.matches?(/\A[A-Za-z0-9][A-Za-z0-9._+-]*\z/)
+    !Process.find_executable(command).nil?
   rescue
     false
   end
@@ -1254,12 +1295,18 @@ class GentilityAgent
     {"error" => "Failed to write file: #{ex.message}"}
   end
 
-  private def execute_psql_query(host : String, port : Int32, dbname : String, query : String, username : String?, password : String?)
-    AgentDatabase.execute_psql_query(host, port, dbname, query, username, password)
+  private def execute_psql_query(host : String, port : Int32, dbname : String, query : String, username : String?, password : String?, read_only : Bool)
+    AgentDatabase.execute_psql_query(host, port, dbname, query, username, password, read_only)
   end
 
-  private def execute_mysql_query(host : String, port : Int32, dbname : String, query : String)
-    AgentDatabase.execute_mysql_query(host, port, dbname, query)
+  private def execute_mysql_query(host : String, port : Int32, dbname : String, query : String, read_only : Bool)
+    AgentDatabase.execute_mysql_query(host, port, dbname, query, read_only)
+  end
+
+  # The server marks a query `read_only: true` when it only reads (capver 5).
+  # Anything but a JSON true leaves the session as it was.
+  private def read_only?(params : JSON::Any?) : Bool
+    params.try(&.["read_only"]?.try(&.as_bool?)) == true
   end
 
   private def send_response(request_id : String, result)
@@ -1287,7 +1334,8 @@ class GentilityAgent
       "nickname"      => @nickname,
       "uptime"        => (Time.instant - @start_time).total_seconds,
       "timestamp"     => Time.utc.to_unix_f,
-      "tools"         => get_available_tools,
+      "tools"         => AgentPolicy.filter_tools(@mode, get_available_tools),
+      "mode"          => @mode,
     }
 
     # Merge security status

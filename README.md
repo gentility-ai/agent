@@ -48,10 +48,10 @@ Download and install the latest package directly:
 
 ```bash
 # Download the latest package
-wget https://github.com/gentility-ai/agent/releases/download/v1.1.1/gentility-agent_1.2.18_amd64.deb
+wget https://github.com/gentility-ai/agent/releases/download/v1.1.1/gentility-agent_1.3.0_amd64.deb
 
 # Install the package
-sudo dpkg -i gentility-agent_1.2.18_amd64.deb
+sudo dpkg -i gentility-agent_1.3.0_amd64.deb
 
 # Install any missing dependencies
 sudo apt-get install -f
@@ -87,6 +87,38 @@ crystal build src/agent.cr --release --static -o gentility
 # Install manually (optional)
 sudo cp gentility /usr/local/bin/gentility
 sudo chmod +x /usr/local/bin/gentility
+```
+
+### Option 5: Container Image
+
+For Kubernetes, ECS or Compose, where a package install does not fit:
+
+```bash
+docker run --read-only \
+  -e GENTILITY_TOKEN=genkey-agent-... \
+  -e NICKNAME=staging-db \
+  -e ENVIRONMENT=staging \
+  ghcr.io/gentility-ai/agent:1.2.19
+```
+
+The image:
+
+- runs as an unprivileged user (uid 10001), needs no writable root filesystem
+  and no added capabilities, and listens on no port. It only dials out, to
+  `ws.gentility.ai` on 443 and to the databases it queries;
+- ships `psql` and `mysql`, which the agent runs queries with;
+- starts in [database-only mode](#database-only-mode). Set
+  `GENTILITY_MODE=full` to lift that;
+- runs stateless by default. Database credentials held on the Gentility
+  server arrive with each query. To keep credentials on the agent instead,
+  mount a volume at `/var/lib/gentility` (the config file lives there, at
+  `GENTILITY_CONFIG`).
+
+Each release is published for amd64 and arm64 with a signed build-provenance
+attestation. Pin the digest in production, and verify it with:
+
+```bash
+gh attestation verify oci://ghcr.io/gentility-ai/agent@sha256:... --owner gentility-ai
 ```
 
 ## Quick Start
@@ -241,6 +273,41 @@ sudo systemctl restart gentility
 - Egress streams are isolated per connection: a slow or stuck destination cannot stall the agent's heartbeats or other streams (the writer is bounded and a saturated stream is torn down with an `io_error`).
 - Errors and stream lifecycle events are reported back to the server as `egress.stream.error` / `egress.stream.close` frames, so failures are visible in the server-side egress logs rather than silently hanging.
 - The server side must be running with `EGRESS_ENABLED=true` for any egress traffic to actually flow; check with your Gentility administrator.
+
+### Database-Only Mode
+
+An agent whose only job is to run SQL, such as one deployed inside a
+cluster next to a database, can refuse everything else:
+
+```yaml
+# /etc/gentility.yaml
+agent_mode: database
+```
+
+or `GENTILITY_MODE=database` in the environment (the container image sets
+this). In database mode the agent:
+
+- runs the query commands (`psql_query`, `mysql_query` and their encrypted
+  and secure variants), credential storage, lock/unlock, `ping`, status and
+  system info;
+- refuses shell execution (`execute`), `file_read`, `file_write`,
+  `gateway_install`, and remote changes to its security settings
+  (`security_set`, `security_unset`, `security_export`), answering with
+  `"code": "command_disabled"`;
+- never acts as an egress route, whatever the `egress:` section says;
+- refuses any command it does not know, so new commands stay off until a
+  release adds them to the list.
+
+The mode is set on the host only. No server command changes it, and the
+environment can tighten a host but not loosen it: if either the config file
+or `GENTILITY_MODE` says `database`, the agent is in database mode. An
+unrecognised value stops the agent at startup instead of falling back to
+`full`.
+
+Queries are passed to `psql` and `mysql` as arguments, never through a
+shell, so a query, hostname or password cannot run anything else on the
+host. What a query may do inside the database is decided by the database
+role you give the agent: use a read-only role for a read-only target.
 
 ## Service Management
 
@@ -454,6 +521,7 @@ export SERVER_URL="wss://your-server.com"
 export NICKNAME="my-custom-name"
 export ENVIRONMENT="staging"
 export DEBUG="true"
+export GENTILITY_MODE="database"   # SQL only; see Database-Only Mode
 
 # Then start the agent
 gentility run
