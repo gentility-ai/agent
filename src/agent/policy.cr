@@ -43,9 +43,14 @@ module AgentPolicy
   # The mode from the config file's `agent_mode` and from GENTILITY_MODE.
   # Either one asking for `database` wins, so an environment variable can
   # tighten a host but never loosen what its config file restricts. A value
-  # that is not a known mode raises: a typo must not fall back to `full`.
+  # that is not a known mode raises: a typo must not fall back to `full`, and
+  # neither may a value that is not a string at all.
   def self.resolve(config : YAML::Any?, env_value : String? = ENV[ENV_VAR]?) : String
-    from_config = config.try(&.as_h?).try(&.[YAML::Any.new(CONFIG_KEY)]?).try(&.as_s?)
+    raw = config.try(&.as_h?).try(&.[YAML::Any.new(CONFIG_KEY)]?)
+    from_config = raw.try do |value|
+      next nil if value.raw.nil?
+      value.as_s? || raise InvalidMode.new("#{CONFIG_KEY} in the config file must be one of: #{MODES.join(", ")}; got #{value.to_json}")
+    end
     requested = [
       {"#{CONFIG_KEY} in the config file", from_config},
       {ENV_VAR, env_value},

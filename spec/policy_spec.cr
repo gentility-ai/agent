@@ -53,6 +53,16 @@ describe AgentPolicy do
         AgentPolicy.resolve(config("agent_mode: db-only"), nil)
       end
     end
+
+    it "refuses an agent_mode that is not a string" do
+      ["agent_mode: true", "agent_mode: [database]", "agent_mode: {mode: database}"].each do |yaml|
+        expect_raises(AgentPolicy::InvalidMode, /agent_mode/) { AgentPolicy.resolve(config(yaml), nil) }
+      end
+    end
+
+    it "treats an empty agent_mode as unset" do
+      AgentPolicy.resolve(config("agent_mode:"), nil).should eq "full"
+    end
   end
 
   describe ".allows?" do
@@ -158,6 +168,20 @@ describe "GentilityAgent in database mode" do
       expect_raises(AgentPolicy::InvalidMode) { create_test_agent }
     end
   end
+
+  it "stops when the config file cannot be read, rather than run in full mode" do
+    with_mode_env(nil) do
+      _, config_file, _ = create_test_agent
+      begin
+        File.write(config_file, "agent_mode: database\n  : [unbalanced\n")
+        expect_raises(AgentPolicy::InvalidMode, /Cannot read the config file/) do
+          GentilityAgent.new("test-token", "ws://localhost:9000", "test-agent", "test")
+        end
+      ensure
+        cleanup_test_agent(config_file)
+      end
+    end
+  end
 end
 
 describe "AgentDatabase command construction" do
@@ -165,32 +189,87 @@ describe "AgentDatabase command construction" do
     query = %(SELECT '"; touch /tmp/pwned; echo "' AS x, $$a$$, `id`, $(id))
     args, env = AgentDatabase.psql_invocation("db.internal", 5432, "app", query, "reader", "p'w; id")
 
-    args.should eq ["-h", "db.internal", "-p", "5432", "-U", "reader", "-d", "app", "-A", "--csv", "-c", query]
+    args.should eq ["-X", "-h", "db.internal", "-p", "5432", "-U", "reader", "-d", "app", "-A", "--csv", "-c", query]
     env.should eq({"PGPASSWORD" => "p'w; id"})
   end
 
   it "omits the user and password when none are given" do
     args, env = AgentDatabase.psql_invocation("h", 5432, "d", "SELECT 1", nil, nil)
-    args.should eq ["-h", "h", "-p", "5432", "-d", "d", "-A", "--csv", "-c", "SELECT 1"]
+    args.should eq ["-X", "-h", "h", "-p", "5432", "-d", "d", "-A", "--csv", "-c", "SELECT 1"]
     env.empty?.should be_true
   end
 
   it "passes a hostile query to mysql as one argument" do
     query = %(SELECT "$(id)" -- `x`)
-    AgentDatabase.mysql_args("h", 3306, "d", query).should eq ["-h", "h", "-P", "3306", "-D", "d", "--batch", "--raw", "-e", query]
+    AgentDatabase.mysql_args("h", 3306, "d", query).should eq ["-h", "h", "-P", "3306", "-D", "d", "--batch", "--raw", "--local-infile=0", "-e", query]
   end
 
   it "makes the psql session read-only when the server asks" do
     args, env = AgentDatabase.psql_invocation("h", 5432, "d", "SELECT 1", "reader", "pw", read_only: true)
-    args.should eq ["-h", "h", "-p", "5432", "-U", "reader", "-d", "d", "-A", "--csv", "-c", "SELECT 1"]
+    args.should eq ["-X", "-h", "h", "-p", "5432", "-U", "reader", "-d", "d", "-A", "--csv", "-c", "SELECT 1"]
     env.should eq({"PGPASSWORD" => "pw", "PGOPTIONS" => "-c default_transaction_read_only=on"})
   end
 
   it "makes the mysql session read-only when the server asks" do
     AgentDatabase.mysql_args("h", 3306, "d", "SELECT 1", read_only: true).should eq [
-      "-h", "h", "-P", "3306", "-D", "d", "--batch", "--raw",
+      "-h", "h", "-P", "3306", "-D", "d", "--batch", "--raw", "--local-infile=0",
       "--init-command=SET SESSION TRANSACTION READ ONLY", "-e", "SELECT 1",
     ]
+  end
+
+  it "refuses a psql meta-command, which psql would run (\\! is a shell)" do
+    ["\\! env", "  \\! env", "\\copy t to '/tmp/x'", "\\i /etc/passwd"].each do |query|
+      expect_raises(ArgumentError, /meta-command/) do
+        AgentDatabase.psql_invocation("h", 5432, "d", query, nil, nil)
+      end
+    end
+  end
+
+  it "refuses a dbname that psql would read as a connection string" do
+    ["x options=-cdefault_transaction_read_only=off", "dbname=x host=evil", "postgresql://evil/x"].each do |dbname|
+      expect_raises(ArgumentError, /connection string/) do
+        AgentDatabase.psql_invocation("h", 5432, dbname, "SELECT 1", nil, nil)
+      end
+    end
+  end
+
+  it "returns a refused psql meta-command as a failed query and runs nothing" do
+    marker = "/tmp/gentility-meta-#{Random.rand(1_000_000)}"
+    begin
+      result = AgentDatabase.execute_psql_query("localhost", 1, "d", "\\! touch #{marker}", nil, nil)
+      result["success"].should be_false
+      result["error"].to_s.should contain("meta-command")
+      File.exists?(marker).should be_false
+    ensure
+      File.delete(marker) if File.exists?(marker)
+    end
+  end
+
+  it "turns the mysql client's own commands off with the switch it has" do
+    AgentDatabase.mysql_args("h", 3306, "d", "SELECT 1", sandbox: "--sandbox").should eq [
+      "-h", "h", "-P", "3306", "-D", "d", "--batch", "--raw", "--local-infile=0", "--sandbox", "-e", "SELECT 1",
+    ]
+  end
+
+  it "finds the mysql client's sandbox switch from its help" do
+    AgentDatabase.sandbox_flag_from_help("  --sandbox           Disallow commands that access the file system").should eq "--sandbox"
+    AgentDatabase.sandbox_flag_from_help("  --commands          Enable or disable processing of local mysql commands.").should eq "--commands=OFF"
+    AgentDatabase.sandbox_flag_from_help("  --batch             Don't use history file.").should be_nil
+  end
+
+  it "keeps the agent's own variables out of the database client's environment" do
+    ENV["GENTILITY_TOKEN"] = "genkey-agent-secret"
+    ENV["PGSSLMODE"] = "verify-full"
+    begin
+      env = AgentDatabase.child_env({"PGPASSWORD" => "pw"})
+      env.has_key?("GENTILITY_TOKEN").should be_false
+      env["PGSSLMODE"].should eq "verify-full"
+      env["PGPASSWORD"].should eq "pw"
+      env["PATH"].should eq ENV["PATH"]
+    ensure
+      ENV.delete("GENTILITY_TOKEN")
+      ENV.delete("PGSSLMODE")
+    end
   end
 
   it "does not run shell syntax smuggled through the host" do

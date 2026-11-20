@@ -119,7 +119,10 @@ class GentilityAgent
   # Raises AgentPolicy::InvalidMode on an unknown value, so a typo stops the
   # agent instead of leaving it in full mode.
   private def load_mode
-    config = AgentConfig.load_config_from_file(AgentConfig.get_config_path)
+    path = AgentConfig.get_config_path
+    config = AgentConfig.load_config_from_file(path)
+    # An unreadable file could be hiding `agent_mode: database`.
+    raise AgentPolicy::InvalidMode.new("Cannot read the config file #{path}, so the agent mode is unknown") if config.nil? && File.exists?(path)
     @mode = AgentPolicy.resolve(config)
     if @mode == AgentPolicy::DATABASE
       Log.info { "Database-only mode: shell, file, gateway and egress commands are refused" }
