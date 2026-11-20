@@ -838,7 +838,7 @@ class GentilityAgent
       password = params.try(&.["password"]?.try(&.to_s))
 
       if host && port && dbname && query
-        execute_psql_query(host, port, dbname, query, username, password)
+        execute_psql_query(host, port, dbname, query, username, password, read_only?(params))
       else
         {"error" => "Missing required parameters: host, port, dbname, query"}
       end
@@ -851,7 +851,7 @@ class GentilityAgent
       query = params.try(&.["query"]?.try(&.to_s))
 
       if host && port && dbname && query
-        execute_mysql_query(host, port, dbname, query)
+        execute_mysql_query(host, port, dbname, query, read_only?(params))
       else
         {"error" => "Missing required parameters: host, port, dbname, query"}
       end
@@ -881,7 +881,7 @@ class GentilityAgent
         password = creds["password"]?.try(&.as_s)
 
         if host && port && dbname
-          execute_psql_query(host, port, dbname, query, username, password)
+          execute_psql_query(host, port, dbname, query, username, password, read_only?(params))
         else
           {"error" => "Invalid stored credentials"}
         end
@@ -912,7 +912,7 @@ class GentilityAgent
         dbname = creds["database"]?.try(&.as_s)
 
         if host && port && dbname
-          execute_mysql_query(host, port, dbname, query)
+          execute_mysql_query(host, port, dbname, query, read_only?(params))
         else
           {"error" => "Invalid stored credentials"}
         end
@@ -1084,7 +1084,7 @@ class GentilityAgent
           password = creds["password"]?.try(&.as_s)
 
           if host && port && dbname
-            execute_psql_query(host, port, dbname, query, username, password)
+            execute_psql_query(host, port, dbname, query, username, password, read_only?(params))
           else
             {"error" => "Invalid decrypted credentials"}
           end
@@ -1117,7 +1117,7 @@ class GentilityAgent
           dbname = creds["database"]?.try(&.as_s)
 
           if host && port && dbname
-            execute_mysql_query(host, port, dbname, query)
+            execute_mysql_query(host, port, dbname, query, read_only?(params))
           else
             {"error" => "Invalid decrypted credentials"}
           end
@@ -1292,12 +1292,18 @@ class GentilityAgent
     {"error" => "Failed to write file: #{ex.message}"}
   end
 
-  private def execute_psql_query(host : String, port : Int32, dbname : String, query : String, username : String?, password : String?)
-    AgentDatabase.execute_psql_query(host, port, dbname, query, username, password)
+  private def execute_psql_query(host : String, port : Int32, dbname : String, query : String, username : String?, password : String?, read_only : Bool)
+    AgentDatabase.execute_psql_query(host, port, dbname, query, username, password, read_only)
   end
 
-  private def execute_mysql_query(host : String, port : Int32, dbname : String, query : String)
-    AgentDatabase.execute_mysql_query(host, port, dbname, query)
+  private def execute_mysql_query(host : String, port : Int32, dbname : String, query : String, read_only : Bool)
+    AgentDatabase.execute_mysql_query(host, port, dbname, query, read_only)
+  end
+
+  # The server marks a query `read_only: true` when it only reads (capver 5).
+  # Anything but a JSON true leaves the session as it was.
+  private def read_only?(params : JSON::Any?) : Bool
+    params.try(&.["read_only"]?.try(&.as_bool?)) == true
   end
 
   private def send_response(request_id : String, result)

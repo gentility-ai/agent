@@ -180,6 +180,19 @@ describe "AgentDatabase command construction" do
     AgentDatabase.mysql_args("h", 3306, "d", query).should eq ["-h", "h", "-P", "3306", "-D", "d", "--batch", "--raw", "-e", query]
   end
 
+  it "makes the psql session read-only when the server asks" do
+    args, env = AgentDatabase.psql_invocation("h", 5432, "d", "SELECT 1", "reader", "pw", read_only: true)
+    args.should eq ["-h", "h", "-p", "5432", "-U", "reader", "-d", "d", "-A", "--csv", "-c", "SELECT 1"]
+    env.should eq({"PGPASSWORD" => "pw", "PGOPTIONS" => "-c default_transaction_read_only=on"})
+  end
+
+  it "makes the mysql session read-only when the server asks" do
+    AgentDatabase.mysql_args("h", 3306, "d", "SELECT 1", read_only: true).should eq [
+      "-h", "h", "-P", "3306", "-D", "d", "--batch", "--raw",
+      "--init-command=SET SESSION TRANSACTION READ ONLY", "-e", "SELECT 1",
+    ]
+  end
+
   it "does not run shell syntax smuggled through the host" do
     marker = "/tmp/gentility-inject-#{Random.rand(1_000_000)}"
     begin

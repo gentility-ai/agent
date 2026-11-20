@@ -6,9 +6,10 @@
 # the websocket connect URL. It is NOT the same as the per-message `v`
 # field that older protocol versions emitted on every frame — capver 4
 # dropped that field entirely. See protocol/capvers.md in the server
-# repo for the canonical history.
+# repo for the canonical history. Capver 5: the agent honours a query's
+# `read_only: true` by running it in a read-only database session.
 module Protocol
-  CAPVER = 4
+  CAPVER = 5
 
   # The provisioning protocol's own version, sent as `pv` on every
   # `session.provision`. It is NOT capver and NOT the v2 message

@@ -6,12 +6,12 @@ module AgentDatabase
   Log = ::Log.for(self)
 
   # Execute PostgreSQL query
-  def self.execute_psql_query(host : String, port : Int32, dbname : String, query : String, username : String?, password : String?)
+  def self.execute_psql_query(host : String, port : Int32, dbname : String, query : String, username : String?, password : String?, read_only : Bool = false)
     Log.info { "PostgreSQL query request - #{host}:#{port}/#{dbname}" }
     Log.debug { "Query: #{query}" }
 
     begin
-      args, env = psql_invocation(host, port, dbname, query, username, password)
+      args, env = psql_invocation(host, port, dbname, query, username, password, read_only)
       execute_db_command("psql", args, env, :csv, "PostgreSQL")
     rescue ex : Exception
       {
@@ -25,12 +25,12 @@ module AgentDatabase
   end
 
   # Execute MySQL query
-  def self.execute_mysql_query(host : String, port : Int32, dbname : String, query : String)
+  def self.execute_mysql_query(host : String, port : Int32, dbname : String, query : String, read_only : Bool = false)
     Log.info { "MySQL query request - #{host}:#{port}/#{dbname}" }
     Log.debug { "Query: #{query}" }
 
     begin
-      execute_db_command("mysql", mysql_args(host, port, dbname, query), {} of String => String, :tsv, "MySQL")
+      execute_db_command("mysql", mysql_args(host, port, dbname, query, read_only), {} of String => String, :tsv, "MySQL")
     rescue ex : Exception
       {
         "success"   => false,
@@ -49,21 +49,30 @@ module AgentDatabase
   # `-A --csv` emits a header row followed by RFC-4180 CSV; we parse it into
   # both a `columns` list and a list-of-list `rows`. The header row is what
   # the Elixir side needs to apply column-aware redaction.
-  def self.psql_invocation(host : String, port : Int32, dbname : String, query : String, username : String?, password : String?) : Tuple(Array(String), Hash(String, String))
+  #
+  # `read_only` (the server's `read_only: true`, capver 5) makes the session's
+  # every transaction read-only, so Postgres itself refuses a write. It is the
+  # same setting the server's own Postgres pools connect with.
+  def self.psql_invocation(host : String, port : Int32, dbname : String, query : String, username : String?, password : String?, read_only : Bool = false) : Tuple(Array(String), Hash(String, String))
     args = ["-h", host, "-p", port.to_s]
     args << "-U" << username if username
     args << "-d" << dbname << "-A" << "--csv" << "-c" << query
 
     env = {} of String => String
     env["PGPASSWORD"] = password if password
+    env["PGOPTIONS"] = "-c default_transaction_read_only=on" if read_only
     {args, env}
   end
 
   # `--batch --raw` emits tab-separated output. We deliberately omit
   # `--skip-column-names` so the first line is the header row, which we use
-  # to populate `columns` for the Elixir redaction layer.
-  def self.mysql_args(host : String, port : Int32, dbname : String, query : String) : Array(String)
-    ["-h", host, "-P", port.to_s, "-D", dbname, "--batch", "--raw", "-e", query]
+  # to populate `columns` for the Elixir redaction layer. `read_only` makes
+  # the session read-only before the query runs, as the server's own MySQL
+  # pools do.
+  def self.mysql_args(host : String, port : Int32, dbname : String, query : String, read_only : Bool = false) : Array(String)
+    args = ["-h", host, "-P", port.to_s, "-D", dbname, "--batch", "--raw"]
+    args << "--init-command=SET SESSION TRANSACTION READ ONLY" if read_only
+    args << "-e" << query
   end
 
   # Execute database command and parse results. The program is run directly
